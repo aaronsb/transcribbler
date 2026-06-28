@@ -154,4 +154,4 @@ The model/tooling research that informed these decisions is preserved in
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
