@@ -68,7 +68,7 @@ Research that informed the ADRs. Captured so the reasoning survives; not a spec.
   KDE thin-client references. https://github.com/rcspam/dictee
 - *Avoid as backends (monoliths, client-UX refs only):* Hyprnote, anarlog, Handy, Vibe.
 
-## The gap transcribber fills
+## The gap transcribbler fills
 
 No small, composable, Linux-first, dual-CUDA/ROCm STT **daemon** does
 transcription + real diarization + canonicalization, with idle GPU unload and an

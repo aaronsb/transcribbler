@@ -7,7 +7,7 @@
 
 ## Context
 
-transcribber includes an always-on capture daemon ([ADR-0008](0008-build-order.md) stage 4)
+transcribbler includes an always-on capture daemon ([ADR-0008](0008-build-order.md) stage 4)
 that buffers audio (with pre-roll) and can transcribe ambient conversation. An
 always-listening tool must never capture silently: the operator needs continuous awareness
 that audio is being captured/transcribed, and first-class control to stop it. This is a

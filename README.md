@@ -1,4 +1,4 @@
-# transcribber
+# transcribbler
 
 A **composable, local-first speech transcription + speaker diarization system** for Linux.
 One backend service, many thin clients, and a pipeline that turns ambient or
@@ -23,7 +23,7 @@ Existing transcription tools fall into two camps, and each fails half of what's 
 **Nobody ships, in Unix-like form, the combination of:** transcription **+ real
 diarization + canonicalization**, with **idle GPU release**, an **OpenAI-compatible
 API**, and a **thin-client ecosystem including an always-on capture daemon with a
-pre-roll buffer and prompt-to-keep.** That gap is what transcribber fills.
+pre-roll buffer and prompt-to-keep.** That gap is what transcribbler fills.
 
 This is a clean-sheet successor to the author's prior `whisper-client` (Rust CLI) and
 `whisper-service` (Docker FastAPI backend), keeping their good ideas (thin client,

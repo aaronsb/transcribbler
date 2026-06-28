@@ -6,7 +6,7 @@
 
 ## Context
 
-The driving requirement for transcribber is captured negatively: avoid
+The driving requirement for transcribbler is captured negatively: avoid
 *"all-in-one applications that are heavy and I have to remember to have running all the
 time, or act 'special' and not unix-like."*
 
@@ -25,7 +25,7 @@ backend, idle GPU release, and a thin always-on capture client.
 
 ## Decision
 
-Build transcribber as a **single long-running backend service** plus a family of
+Build transcribbler as a **single long-running backend service** plus a family of
 **thin, independent clients**, following the Unix philosophy:
 
 - The backend does transcription + diarization + canonicalization and exposes a clean

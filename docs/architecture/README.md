@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-These ADRs record the decisions behind transcribber and *why* they were made, so a
+These ADRs record the decisions behind transcribbler and *why* they were made, so a
 future contributor (human or agent) can see the reasoning, not just the result.
 
 Format: lightweight [MADR](https://adr.github.io/madr/)-style. One decision per file.
