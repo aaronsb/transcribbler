@@ -15,6 +15,7 @@ Format: lightweight [MADR](https://adr.github.io/madr/)-style. One decision per 
 | [0006](0006-canonical-ir-contract.md) | Canonical IR as the backend-agnostic pipeline contract | Accepted |
 | [0007](0007-supervisor-agnostic-packaging.md) | Supervisor-agnostic single process; systemd + container wrappers | Accepted |
 | [0008](0008-build-order.md) | Build order: CLI daemon first | Accepted |
+| [0009](0009-capture-cadence-and-operator-awareness.md) | Capture cadence (session vs turn epochs) + operator awareness & control | Accepted |
 
 ## Conventions
 
