@@ -1,0 +1,67 @@
+{
+  "schema_version": "0.1",
+  "source": {
+    "kind": "session",
+    "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "duration_s": 41.2,
+    "captured_at": "2026-06-28T15:30:00Z"
+  },
+  "backend": {
+    "kind": "modular",
+    "asr": "whisper.cpp/large-v3",
+    "diarizer": "pyannote/community-1"
+  },
+  "speakers": [
+    {
+      "id": "S1",
+      "display_name": "Aaron",
+      "role": "host",
+      "confidence": 0.86,
+      "evidence": ["self-intro @ 0.4s"],
+      "source": "llm"
+    },
+    {
+      "id": "S2",
+      "display_name": "Dana",
+      "role": "client",
+      "confidence": 0.71,
+      "evidence": ["addressed as 'Dana' @ 12.1s"],
+      "source": "llm"
+    }
+  ],
+  "turns": [
+    {
+      "speaker_id": "S1",
+      "start": 0.40,
+      "end": 6.80,
+      "text": "Hi, I'm Aaron from Praecipio — thanks for hopping on.",
+      "words": [
+        { "t": 0.40, "d": 0.20, "w": "Hi," },
+        { "t": 0.80, "d": 0.18, "w": "I'm" },
+        { "t": 1.05, "d": 0.35, "w": "Aaron" },
+        { "t": 1.60, "d": 0.22, "w": "from" },
+        { "t": 1.95, "d": 0.55, "w": "Praecipio" }
+      ],
+      "provenance": { "chunk": 0, "offset_s": 0.0 }
+    },
+    {
+      "speaker_id": "S2",
+      "start": 7.10,
+      "end": 12.00,
+      "text": "Happy to be here. We've been looking forward to this.",
+      "provenance": { "chunk": 0, "offset_s": 0.0 }
+    },
+    {
+      "speaker_id": "S1",
+      "start": 12.10,
+      "end": 18.40,
+      "text": "Great, Dana. Let's start with where things stand today.",
+      "secondary_speakers": ["S2"],
+      "provenance": { "chunk": 1, "offset_s": 12.0 }
+    }
+  ],
+  "glossary": [
+    { "canonical": "Praecipio", "variants": ["precipio", "Precipeo", "pre-cipio"] }
+  ],
+  "tags": ["meeting", "sales-call"]
+}

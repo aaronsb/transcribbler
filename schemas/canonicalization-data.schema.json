@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aaronsb/transcribbler/schemas/canonicalization-data.schema.json",
+  "title": "Canonicalization data (LLM output)",
+  "description": "The ONLY thing the canonicalization LLM emits (ADR-0006): a small mapping table, never the transcript body. A pure apply() function rewrites the Canonical IR from (global clusters + this mapping). llama.cpp enforces this schema via GBNF/JSON-schema-constrained decoding (ADR-0004), so output is always valid.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["speaker_map", "term_map"],
+  "properties": {
+    "speaker_map": {
+      "type": "array",
+      "description": "One entry per canonical speaker id the model could label. Ids not present are left as fallback (Speaker A/B/C).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^S[0-9]+$" },
+          "display_name": { "type": "string" },
+          "role": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "evidence": { "type": "string", "description": "Short justification, e.g. 'introduces self at 12.4s'." }
+        }
+      }
+    },
+    "term_map": {
+      "type": "array",
+      "description": "Canonical spelling for names/jargon Whisper rendered inconsistently across chunks. May be empty.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["canonical", "variants"],
+        "properties": {
+          "canonical": { "type": "string" },
+          "variants": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+        }
+      }
+    }
+  }
+}

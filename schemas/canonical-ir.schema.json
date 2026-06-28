@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/aaronsb/transcribbler/schemas/canonical-ir.schema.json",
+  "title": "Canonical IR",
+  "description": "The backend-agnostic transcript contract (ADR-0006). One document = one recording (batch) or one session epoch (ADR-0009). Both the modular and joint backends (ADR-0005) emit this; all renderers consume it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source", "backend", "speakers", "turns"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1",
+      "description": "IR schema version. Bump on breaking changes."
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "duration_s"],
+      "properties": {
+        "kind": { "enum": ["batch", "session"], "description": "batch = a file/URL; session = a live capture session epoch (ADR-0009)." },
+        "uri": { "type": "string", "description": "Origin of the audio (file path, URL). Absent for ephemeral live captures." },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$", "description": "Hash of the normalized source audio, for provenance/dedup." },
+        "duration_s": { "type": "number", "exclusiveMinimum": 0 },
+        "captured_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["modular", "joint"], "description": "ADR-0005 backend family." },
+        "asr": { "type": "string", "description": "ASR engine/model id, e.g. 'whisper.cpp/large-v3'." },
+        "diarizer": { "type": "string", "description": "Diarizer id, e.g. 'pyannote/community-1'. Omitted for a joint backend that does ASR+diarization in one model." }
+      }
+    },
+    "speakers": {
+      "type": "array",
+      "description": "Canonical, recording-wide speaker identities. Stable IDs come from global diarization (ADR-0005); names/roles come from the canonicalization mapping (ADR-0006).",
+      "items": { "$ref": "#/$defs/speaker" }
+    },
+    "turns": {
+      "type": "array",
+      "description": "Speaker-attributed segments in chronological order.",
+      "items": { "$ref": "#/$defs/turn" }
+    },
+    "glossary": {
+      "type": "array",
+      "description": "Term normalization applied across the document (ADR-0006).",
+      "items": { "$ref": "#/$defs/glossary_entry" }
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "speaker_id": {
+      "type": "string",
+      "pattern": "^S[0-9]+$",
+      "description": "Canonical speaker id, e.g. 'S1'."
+    },
+    "speaker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source"],
+      "properties": {
+        "id": { "$ref": "#/$defs/speaker_id" },
+        "display_name": { "type": "string", "description": "Human name/label, e.g. 'Aaron'. Absent if unresolved." },
+        "role": { "type": "string", "description": "e.g. 'host', 'client', 'interviewer'." },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "Confidence in the name/role assignment." },
+        "evidence": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Why this label was assigned, e.g. 'self-intro @ 12.4s'."
+        },
+        "source": {
+          "enum": ["llm", "manual", "fallback"],
+          "description": "How the label was set: llm mapping, human override, or non-LLM fallback (plain Speaker A/B/C)."
+        }
+      }
+    },
+    "word": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["t", "d", "w"],
+      "properties": {
+        "t": { "type": "number", "minimum": 0, "description": "Word start time (s), absolute within the document." },
+        "d": { "type": "number", "minimum": 0, "description": "Word duration (s)." },
+        "w": { "type": "string", "description": "Word text." }
+      }
+    },
+    "turn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["speaker_id", "start", "end", "text"],
+      "properties": {
+        "speaker_id": { "$ref": "#/$defs/speaker_id" },
+        "start": { "type": "number", "minimum": 0, "description": "Turn start (s), absolute within the document." },
+        "end": { "type": "number", "minimum": 0, "description": "Turn end (s), absolute. Must be >= start (enforced by the apply() builder)." },
+        "text": { "type": "string" },
+        "words": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/word" },
+          "description": "Optional word-level timing (present when the backend provides alignment)."
+        },
+        "secondary_speakers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/speaker_id" },
+          "description": "Other speakers active during this turn (overlapped speech)."
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["chunk", "offset_s"],
+          "properties": {
+            "chunk": { "type": "integer", "minimum": 0, "description": "Index of the ASR chunk this turn came from." },
+            "offset_s": { "type": "number", "minimum": 0, "description": "Absolute start time of that chunk; carries true offsets so stitching can't drift (ADR-0006)." }
+          }
+        }
+      }
+    },
+    "glossary_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical", "variants"],
+      "properties": {
+        "canonical": { "type": "string" },
+        "variants": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

@@ -43,7 +43,13 @@ are *not* stored as IR. The IR therefore stays ignorant of capture cadence; epoc
 identifiers are intentionally absent (deferred to [ADR-0014](0014-ir-epoch-session-identity.md)
 unless composable cadence is ever adopted).
 
-### Canonical IR (sketch — to be finalized before coding)
+> **Finalized:** the authoritative contract now lives as JSON Schema (draft 2020-12) in
+> [`/schemas`](../../schemas/) — `canonical-ir.schema.json` and
+> `canonicalization-data.schema.json`, with golden fixtures and a validator
+> (`make validate-schemas`). The sketches below are illustrative; the schema files are
+> the source of truth.
+
+### Canonical IR (illustrative sketch — see `/schemas` for the authoritative version)
 
 ```jsonc
 {
