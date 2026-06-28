@@ -36,6 +36,13 @@ The LLM runs greedy/temp-0 with a fixed seed and **GBNF grammar** ([ADR-0004](00
 so output is always schema-valid. Its mapping is **cached, reviewable, and overridable**,
 with a non-LLM fallback (plain "Speaker A/B/C") so the pipeline degrades gracefully.
 
+**IR unit = one recording / one session epoch.** One IR document corresponds to a single
+recording (batch) or a single **session epoch** from live capture
+([ADR-0009](0009-capture-cadence.md)). Turn-epoch preview fragments are non-canonical and
+are *not* stored as IR. The IR therefore stays ignorant of capture cadence; epoch/session
+identifiers are intentionally absent (deferred to [ADR-0014](0014-ir-epoch-session-identity.md)
+unless composable cadence is ever adopted).
+
 ### Canonical IR (sketch — to be finalized before coding)
 
 ```jsonc

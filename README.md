@@ -49,12 +49,13 @@ reassembly, per-chunk diarization that can't keep speaker identity consistent).
    (calls, meetings) with minimal friction.
 8. **Operator awareness & control.** Whenever audio is being captured or transcribed,
    there is a clear, always-visible indicator. The operator can explicitly start and
-   **stop a transcription session** at any time. Capture is never silent or hidden.
+   **stop a transcription session** at any time. Capture is never silent or hidden
+   (see [ADR-0010](docs/architecture/0010-operator-awareness-and-control.md)).
 9. **Configurable capture cadence.** The same pipeline runs at two granularities
-   (see [ADR-0009](docs/architecture/0009-capture-cadence-and-operator-awareness.md)):
+   (see [ADR-0009](docs/architecture/0009-capture-cadence.md)):
    a coarse **session epoch** that closes on extended silence or operator stop (the
-   archival "meeting transcript"), and a fine **turn epoch** — a more sensitive
-   silence detector that transcribes eagerly per turn (best-effort, low-latency).
+   archival, canonical "meeting transcript"), and a fine **turn epoch** — a more
+   sensitive silence detector that yields eager, preview-grade per-turn text.
 
 ## Non-goals
 
@@ -102,7 +103,7 @@ flowchart LR
    *"voice detected — keep & transcribe?"* with a few seconds of pre-roll already captured.
    A CLI-only variant does the same with no desktop. While a session is live, a visible
    indicator (tray icon state / CLI status line) shows audio is being transcribed, and
-   the operator can stop the session at any time ([ADR-0009](docs/architecture/0009-capture-cadence-and-operator-awareness.md)).
+   the operator can stop the session at any time ([ADR-0010](docs/architecture/0010-operator-awareness-and-control.md)).
 4. **Eager per-turn capture (cadence variant).** The same daemon run in **turn-epoch**
    mode transcribes each utterance as it lands (sensitive silence detection), instead of
    waiting for a whole session to close — useful for live note-taking where you want text

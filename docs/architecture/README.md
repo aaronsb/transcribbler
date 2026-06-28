@@ -15,7 +15,12 @@ Format: lightweight [MADR](https://adr.github.io/madr/)-style. One decision per 
 | [0006](0006-canonical-ir-contract.md) | Canonical IR as the backend-agnostic pipeline contract | Accepted |
 | [0007](0007-supervisor-agnostic-packaging.md) | Supervisor-agnostic single process; systemd + container wrappers | Accepted |
 | [0008](0008-build-order.md) | Build order: CLI daemon first | Accepted |
-| [0009](0009-capture-cadence-and-operator-awareness.md) | Capture cadence (session vs turn epochs) + operator awareness & control | Accepted |
+| [0009](0009-capture-cadence.md) | Capture cadence: the epoch model (session vs turn) | Accepted |
+| [0010](0010-operator-awareness-and-control.md) | Operator awareness, control & not-covert | Accepted |
+| [0011](0011-idle-unload-keepalive-lease.md) | Idle-unload keep-alive lease during live capture | Proposed |
+| [0012](0012-capture-store-and-forward.md) | Capture store-and-forward spool | Proposed |
+| [0013](0013-retention-and-consent.md) | Retention, deletion & third-party consent | Proposed |
+| [0014](0014-ir-epoch-session-identity.md) | IR epoch/session identity & deterministic merge | Deferred |
 
 ## Conventions
 
