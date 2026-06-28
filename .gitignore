@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Rust
+target/
+
+# Models & weights (never commit these)
+models/
+*.gguf
+*.bin
+*.pt
+*.onnx
+*.ckpt
+
+# Audio / captured data (privacy: never commit recordings or transcripts)
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.mkv
+*.mp4
+captures/
+transcripts/
+*.vtt
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
+secrets/
+*.token
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

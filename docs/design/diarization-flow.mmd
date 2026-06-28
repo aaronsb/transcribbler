@@ -1,0 +1,44 @@
+flowchart TB
+    A["Audio in"] --> B["Normalize 16k mono"]
+    B --> C["Global VAD (Silero, CPU)"]
+    C --> D{"Backend?"}
+
+    subgraph MOD["Modular default (composable, both GPUs)"]
+        direction TB
+        E["Diarize WHOLE file<br/>pyannote 4 community-1<br/>exclusive mode"]
+        F["ASR chunked at turns<br/>whisper.cpp large-v3"]
+        G["Align: word to overlapping turn<br/>= who said what"]
+        E --> G
+        F --> G
+    end
+
+    subgraph JOINT["Joint backend (hard cases)"]
+        direction TB
+        J["VibeVoice-ASR 9B<br/>single pass: text + speakers + time"]
+    end
+
+    D -->|modular| E
+    D -->|modular| F
+    D -->|joint| J
+
+    G --> K["Canonical IR"]
+    J --> K
+
+    subgraph CANON["Canonicalization stage"]
+        direction TB
+        L["Deterministic:<br/>stable IDs, provenance, stitch"]
+        M["LLM via GBNF JSON:<br/>speaker to name/role/tags<br/>+ term normalization"]
+        N["Apply (pure function)"]
+        L --> M --> N
+    end
+
+    K --> L
+    N --> O["Render: VTT / Markdown / JSON"]
+    O --> P[("Transcript store")]
+
+    classDef gpu fill:#1a3a5c,stroke:#66a3cc,color:#fff;
+    classDef cpu fill:#2d4a2d,stroke:#7ac77a,color:#fff;
+    classDef llm fill:#4a2d4a,stroke:#c77ac7,color:#fff;
+    class E,F,J gpu;
+    class C cpu;
+    class M llm;
