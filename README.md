@@ -47,12 +47,24 @@ reassembly, per-chunk diarization that can't keep speaker identity consistent).
 6. **Runs on the hardware we have** — an NVIDIA/CUDA server *and* an AMD/ROCm desktop.
 7. **Better daily coverage.** Capture the conversations of a work-from-home day
    (calls, meetings) with minimal friction.
+8. **Operator awareness & control.** Whenever audio is being captured or transcribed,
+   there is a clear, always-visible indicator. The operator can explicitly start and
+   **stop a transcription session** at any time. Capture is never silent or hidden
+   (see [ADR-0010](docs/architecture/0010-operator-awareness-and-control.md)).
+9. **Configurable capture cadence.** The same pipeline runs at two granularities
+   (see [ADR-0009](docs/architecture/0009-capture-cadence.md)):
+   a coarse **session epoch** that closes on extended silence or operator stop (the
+   archival, canonical "meeting transcript"), and a fine **turn epoch** — a more
+   sensitive silence detector that yields eager, preview-grade per-turn text.
 
 ## Non-goals
 
 - Not a hosted SaaS or a multi-tenant product.
+- **Not covert.** The system never captures or transcribes without a visible active
+  indicator and operator-grantable consent — no hidden/always-silent recording.
 - Not a real-time captioning engine first (live preview is a later, lower-fidelity tier;
-  the source-of-truth transcript is produced offline).
+  the source-of-truth transcript is produced offline). Note: *cadence* (when an epoch
+  closes) is a separate axis from *fidelity* (live preview vs offline canonical).
 - Not a new inference engine — we **reuse** whisper.cpp / pyannote / llama.cpp and
   invest our effort in the connective tissue that doesn't exist yet.
 - Not a single all-in-one GUI application.
@@ -89,7 +101,13 @@ flowchart LR
    when it heuristically detects a conversation (mic active, Zoom/Chrome running, speech
    via VAD), it's *already* been recording into a ring buffer, and offers
    *"voice detected — keep & transcribe?"* with a few seconds of pre-roll already captured.
-   A CLI-only variant does the same with no desktop.
+   A CLI-only variant does the same with no desktop. While a session is live, a visible
+   indicator (tray icon state / CLI status line) shows audio is being transcribed, and
+   the operator can stop the session at any time ([ADR-0010](docs/architecture/0010-operator-awareness-and-control.md)).
+4. **Eager per-turn capture (cadence variant).** The same daemon run in **turn-epoch**
+   mode transcribes each utterance as it lands (sensitive silence detection), instead of
+   waiting for a whole session to close — useful for live note-taking where you want text
+   to appear turn-by-turn.
 
 ## Architecture at a glance
 
