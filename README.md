@@ -1,5 +1,10 @@
 # transcribbler
 
+<!--
+  "Well, hi-diddly-ho, neighborino! If you need those words jotted down on paper,
+  I'd be absolutely tickled pink to just trans-scribbler-diddly-doo 'em right up for ya!"
+-->
+
 A **composable, local-first speech transcription + speaker diarization system** for Linux.
 One backend service, many thin clients, and a pipeline that turns ambient or
 on-demand audio into clean, speaker-attributed, named transcripts — without a
