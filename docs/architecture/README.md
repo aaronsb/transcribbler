@@ -26,7 +26,8 @@ Format: lightweight [MADR](https://adr.github.io/madr/)-style. One decision per 
 | [0017](0017-rust-clients-python-service.md) | Rust single-binary clients over a Python backend service | Proposed |
 | [0018](0018-client-facing-wire.md) | Client-facing wire — one HTTP contract over Unix-socket (local) + TCP (remote) | Proposed |
 | [0019](0019-job-scheduling.md) | Job scheduling — admission, concurrency, live priority (drain-and-suspend) | Proposed |
-| [0020](0020-remote-access-security.md) | Remote access & security — per-locality tiers (UDS / SSH / cloud-worker) | Proposed |
+| [0020](0020-remote-access-security.md) | Remote access & security — per-locality tiers (UDS / SSH / direct) + principal model | Proposed |
+| [0021](0021-internet-cloud-worker.md) | Internet access via an authenticated cloud worker (deferred) | Proposed |
 
 ## Conventions
 

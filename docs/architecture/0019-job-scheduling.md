@@ -34,9 +34,15 @@ lifecycle with admission, a queue, and priority.
 
 ### Two job classes
 
-- **Live ("you have one job").** Singleton — at most one live session per backend.
-  Latency-critical, **top priority**, holds the [ADR-0011](0011-idle-unload-keepalive-lease.md)
-  keep-alive lease for the whole session. Not preemptable by batch.
+- **Live.** Latency-critical, **top priority**, holds the
+  [ADR-0011](0011-idle-unload-keepalive-lease.md) keep-alive lease while active;
+  not preemptable by batch. **Multiple live sessions may run at once** (several
+  accounts / devices). The backend cannot *guarantee* real-time for all of them on one
+  GPU — but it **never drops audio**: each live session captures to its own spool
+  ([ADR-0012](0012-capture-store-and-forward.md)), and transcription runs as capacity
+  allows, degrading gracefully from real-time to catch-up under contention. **Capture
+  is decoupled from transcription** — the thing that must never fail (recording the
+  audio) is independent of the thing that can lag (turning it into text).
 - **Batch.** Submit many; they queue, run, and can be **deferred and suspended**.
   Preemptable at a work-unit (chunk) boundary.
 
@@ -57,9 +63,25 @@ headroom** (small models, or the 24GB card running ASR+diarize concurrently) —
 because on a single GPU naive parallelism usually adds VRAM and overhead without
 improving wall-clock.
 
+### Ownership & fair queueing
+
+**Every job is owned by the principal that submitted it** (the account each transport
+authenticates — [ADR-0020](0020-remote-access-security.md)). The queue is therefore
+**per-requester aware**, not a single anonymous line:
+
+- A principal can list/cancel **its own** jobs; it does not see others' content.
+- Scheduling within the batch class is **fair across requesters** (round-robin over
+  owners), so one account's 400-file backlog can't starve another's single file.
+- The client is told its **position** — the wire (ADR-0018) emits a `queued
+  {position, ahead}` event, updated as the line moves: *"3 jobs ahead of you" → 2 → 1
+  → running*. This is the same SSE stream that later carries progress.
+
+This is what makes a single backend usable by several trusted people/devices at once
+(multi-user, not multi-tenant — ADR-0020).
+
 ### Priority — drain-and-suspend
 
-When a live session starts while batch is running:
+When **any** live session starts while batch is running:
 
 1. Stop **admitting** new batch work.
 2. Let the in-flight batch unit **finish its current chunk** (bounded wait — one
@@ -68,14 +90,17 @@ When a live session starts while batch is running:
 3. Free the VRAM and give the GPU to live.
 
 No work is killed; live waits at most a chunk's worth of drain. When live ends, the
-suspended batch job **resumes** from its next chunk.
+suspended batch job **resumes** from its next chunk. Among **multiple** live sessions
+that can't all stay real-time, the GPU is **fair-shared** and each session's audio
+keeps spooling — slower text, never lost audio.
 
 ### Lifecycle (extends ADR-0018)
 
 `queued` (admitted-pending-resources) → `running` → optional `paused`
-(batch yielded to live) → `done` / `failed` / `canceled`. Ordering is FIFO within a
-class; live always outranks batch. Empty queue **and** no live session → idle TTL →
-unload (ADR-0011), freeing the GPU for games/other work — the whole point.
+(batch yielded to live) → `done` / `failed` / `canceled`. Live always outranks batch;
+within the batch class, ordering is FIFO **fair across requesters** (no single owner
+starves the rest). Empty queue **and** no live session → idle TTL → unload
+(ADR-0011), freeing the GPU for games/other work — the whole point.
 
 ### Scope
 
@@ -94,6 +119,10 @@ backend owns its own queue first.
 - Honest about single-GPU reality; no false promise of parallel speedup, but real
   pipelining/IO-overlap wins are taken.
 - The queue reuses the spool; idle-unload still reclaims the GPU when truly idle.
+- **Multiple live sessions never lose audio** — capture is decoupled from
+  transcription, so contention costs latency, not data.
+- **Several trusted accounts share one backend fairly** — per-requester ownership +
+  fair queueing + visible "N ahead of you," with no multi-tenant machinery.
 
 ### Bad / costs
 
@@ -105,6 +134,9 @@ backend owns its own queue first.
   (a tunable, not the default).
 - Suspend/resume requires batch jobs to be genuinely chunk-resumable end to end
   (ASR chunks + global diarize re-run or cached) — a constraint on the pipeline.
+- Multiple concurrent live sessions multiply VRAM pressure (each holds a model set
+  loaded); the spool keeps audio safe, but sustained real-time for *many* live streams
+  on one GPU is not guaranteed.
 
 ## Alternatives considered
 
@@ -123,8 +155,10 @@ backend owns its own queue first.
 
 ## Related
 
-- ADR-0018 (the job this schedules), ADR-0011 (lease held by live; idle unload),
-  ADR-0012 (spool = the persistent queue), ADR-0005 (chunked ASR = the work-unit /
-  suspend boundary), ADR-0009 (live cadence: session vs turn epochs),
+- ADR-0018 (the job this schedules; carries `queued {position, ahead}`),
+  [ADR-0020](0020-remote-access-security.md) (the principal that owns each job),
+  ADR-0011 (lease held by live; idle unload), ADR-0012 (spool = the persistent queue
+  *and* the live audio buffer that prevents data loss), ADR-0005 (chunked ASR = the
+  work-unit / suspend boundary), ADR-0009 (live cadence: session vs turn epochs),
   ADR-0002 (per-host capacity; future cross-host distribution),
   ADR-0007 (in-process, low-overhead — no external broker).

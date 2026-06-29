@@ -63,9 +63,11 @@ Because work outlives a request, the model is **jobs**, not a single blocking ca
 - `POST /v1/jobs` — submit audio (multipart: metadata + file) with a **profile name**
   (resolved server-side against the ADR-0017 allowlist — never a path), and flags
   (`diarize`, `canon`, `prompt`). Returns `202` + a job id.
-- `GET /v1/jobs/{id}/events` — **SSE** stream of progress: `progress {stage,
-  completed, total}` … terminal `done {ir_ref}` or `error {code, message}`. This is
-  the wire form of the transport-agnostic progress sink from ADR-0017 (PR #13 #4).
+- `GET /v1/jobs/{id}/events` — **SSE** stream: `queued {position, ahead}` while it
+  waits in line (updated as the queue moves — [ADR-0019](0019-job-scheduling.md)) →
+  `progress {stage, completed, total}` once running → terminal `done {ir_ref}` or
+  `error {code, message}`. This is the wire form of the transport-agnostic progress
+  sink from ADR-0017 (PR #13 #4).
 - `GET /v1/jobs/{id}` — job state + the Canonical IR when complete.
 - `GET /v1/jobs/{id}/result?format=md|vtt|json` — **server-side render**, so a
   `curl`/non-Rust client gets a readable view without reimplementing render.
