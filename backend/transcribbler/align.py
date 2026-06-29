@@ -91,5 +91,11 @@ def align(segments: list[Segment], turns: list[SpeakerTurn]) -> tuple[list[str],
                 secondary_speakers=secondary,
             )
         )
-    ordered_ids = [labels[label] for label in labels]  # insertion order = first appearance
+    # Only declare speakers actually referenced by a turn (primary or secondary).
+    # A diarized speaker whose turns never won any segment is dropped, not emitted
+    # as an orphan speaker with zero turns.
+    used: set[str] = {a.speaker_id for a in aligned}
+    for a in aligned:
+        used.update(a.secondary_speakers)
+    ordered_ids = [labels[label] for label in labels if labels[label] in used]
     return ordered_ids, aligned
