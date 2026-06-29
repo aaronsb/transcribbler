@@ -8,6 +8,9 @@ engine = "whisper.cpp"
 backend = "vulkan"                                              # runs on the RX 7900 XTX (and any Vulkan GPU)
 binary = "/home/aaron/Projects/ai/whisper.cpp/build/bin/whisper-cli"
 model = "/home/aaron/Projects/ai/whisper.cpp/models/ggml-base.en.bin"
+# Optional initial prompt: biases spelling of names/jargon (max ~224 tokens),
+# carried across whisper's 30s windows. `--prompt` on the CLI overrides this.
+# prompt = "transcribbler, pyannote, llama.cpp, gfx1100"
 
 [diar]
 engine = "pyannote"                                            # PyTorch sidecar (torch-ROCm); ASR stays on Vulkan

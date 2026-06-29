@@ -22,10 +22,40 @@ def log(*a):
     print(*a, file=sys.stderr, flush=True)
 
 
+class _ProgressToStderr:
+    """pyannote hook → machine-readable progress lines on stderr.
+
+    Emits ``@@P@@<TAB>step<TAB>completed<TAB>total`` (newline-terminated so the
+    parent can read it line-by-line and render it live). The parent recognizes
+    the sentinel and reformats; everything else stays human log output. Deduped
+    on integer percent so a long step doesn't flood the pipe.
+    """
+
+    def __enter__(self):
+        self._last: dict[str, int] = {}
+        return self
+
+    def __exit__(self, *a):
+        return
+
+    def __call__(self, step_name, step_artifact, file=None, total=None, completed=None):
+        if completed is None:
+            completed = total = 1
+        try:
+            pct = int(100 * completed / total) if total else 0
+        except (TypeError, ZeroDivisionError):
+            return
+        if self._last.get(step_name) == pct:
+            return
+        self._last[step_name] = pct
+        print(f"@@P@@\t{step_name}\t{completed}\t{total}", file=sys.stderr, flush=True)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("audio", help="normalized audio file (16 kHz mono wav)")
     ap.add_argument("--model", default="pyannote/speaker-diarization-community-1")
+    ap.add_argument("--progress", action="store_true", help="emit @@P@@ progress lines on stderr")
     args = ap.parse_args()
 
     token = os.environ.get("HF_TOKEN")
@@ -55,7 +85,12 @@ def main() -> int:
     data, sample_rate = sf.read(args.audio, dtype="float32", always_2d=False)
     waveform = torch.from_numpy(data)
     waveform = waveform.unsqueeze(0) if waveform.ndim == 1 else waveform.T  # (channel, time)
-    output = pipeline({"waveform": waveform, "sample_rate": sample_rate})
+    inputs = {"waveform": waveform, "sample_rate": sample_rate}
+    if args.progress:
+        with _ProgressToStderr() as hook:
+            output = pipeline(inputs, hook=hook)
+    else:
+        output = pipeline(inputs)
     # pyannote 4.x returns DiarizeOutput; .speaker_diarization is the full Annotation
     # (keeps overlapping turns, so our alignment can flag secondary speakers).
     annotation = output.speaker_diarization if hasattr(output, "speaker_diarization") else output

@@ -21,14 +21,23 @@ heavy monolithic app you have to babysit.
 
 ```bash
 # one-time: build whisper.cpp (Vulkan) + fetch a model — see backend/README.md
-uv run --project backend transcribbler probe                       # what GPUs are here
-uv run --project backend transcribbler transcribe call.m4a \
-    -p profiles/desktop-vulkan.toml -f md -o call.md               # diarized Markdown
-uv run --project backend transcribbler render call.ir.json -f vtt  # re-render IR → WebVTT
+transcribbler probe                              # what GPUs are here
+transcribbler transcribe call.m4a -f md -o call.md   # diarized Markdown (profile auto-selected)
+transcribbler render call.ir.json -f vtt         # re-render IR → WebVTT
 ```
 
+The compute **profile is auto-selected** by the detected GPU; override with
+`-p <name>` (e.g. `-p cube-cuda`), a `.toml` path, or `$TRANSCRIBBLER_PROFILE`.
 Output is the **Canonical IR** (`-f json`) or a readable view (`-f md` / `-f vtt`).
 A 57-min real conference transcribes + diarizes in ~2.5 min on an RX 7900 XTX.
+
+Live ASR/diarization progress streams to stderr when it's a TTY (`--progress` /
+`--no-progress` to force). `--prompt "names, jargon"` biases ASR spelling (or set
+`[asr] prompt` in the profile).
+
+> Not installed yet? Prefix any command with `uv run --project backend`, e.g.
+> `uv run --project backend transcribbler probe`. `make install` puts the
+> `transcribbler` launcher on `~/.local/bin` so you can drop the prefix.
 
 ---
 
