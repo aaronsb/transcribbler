@@ -26,12 +26,36 @@ Pipeline: **whisper.cpp (Vulkan) → pyannote (ROCm) → overlap-align → Canon
 - **Renderers** md/vtt/json; `transcribe`/`render`/`probe` CLI; Makefile control panel + ruff + CI.
 
 ## Next (task list — see TaskCreate/TaskList)
-1. **Voiceprint enrollment (ADR-0016)** — the primary naming path. Emit `speaker_embeddings`
-   from the sidecar (currently discarded), `enroll` mode, XDG voiceprint store, cosine match
-   at transcribe → `source: "enrolled"`. *Highest value.*
-2. **Batch/dir + YouTube ingest** — for bulk (the 431-file Alan Watts set).
-3. **cube (CUDA) topology** — build engines on cube, finalize `profiles/cube-cuda.toml`; prove "swap GPU = swap profile".
-4. **Capture daemon** — PipeWire ring buffer + Silero VAD + pre-roll + prompt-to-keep (ADR-0009/0010).
+
+The architecture spine landed as **ADR-0017–0021** (Rust single-binary clients over a Python
+backend service; one client-facing HTTP wire over Unix-socket locally + TCP remotely; job
+scheduling with a "partial singleton" live mode; per-locality security tiers; a deferred
+internet cloud-worker tier). ADR-0017 **resequences the build order**: introduce the
+client/server boundary *before* the remaining features.
+
+**Build order (the implementation spine — do in order):**
+1. **Extract the backend HTTP service (ADR-0018)** [task #6] — wrap the existing cores
+   (`whisper_cpp`, `pyannote`, renderers) in the client-facing wire: audio → IR over HTTP on a
+   Unix socket, server-owned async jobs, SSE `queued/progress/paused/done|error|canceled`,
+   profile-by-name (server-side allowlist), `/version`. No behavior change vs today's CLI.
+2. **Build the Rust CLI to parity over the wire (ADR-0017)** [task #7, blocked by #6] —
+   `clients/cli/` (cargo), IR types **codegen'd from `schemas/`**; `transcribe/render/probe`
+   parity; render lives client-side. This is the "feels like one clean binary" successor to
+   whisper-client.
+
+**Then the features (most now ride on the wire):**
+3. **Batch/dir + YouTube ingest** [task #2, blocked by #7] — Rust-client feature; bulk (the
+   431-file Alan Watts set).
+4. **Live audio-ingest ADR** [task #8] — capture-daemon streaming path (the wire's live mode).
+5. **Capture daemon** [task #4, blocked by #7, #8] — PipeWire ring buffer + Silero VAD +
+   pre-roll + prompt-to-keep (ADR-0009/0010).
+
+**Independent / unblocked backend work (can start anytime, no wire dependency):**
+- **Voiceprint enrollment (ADR-0016)** [task #1] — the primary naming path. Emit
+  `speaker_embeddings` from the sidecar (currently discarded), `enroll` mode, XDG voiceprint
+  store, cosine match at transcribe → `source: "enrolled"`. *Highest backend value.*
+- **cube (CUDA) topology** [task #3] — build engines on cube, finalize `profiles/cube-cuda.toml`;
+  prove "swap GPU = swap profile".
 
 ## Key facts / context
 - **Hardware:** desktop = AMD RX 7900 XTX (24GB, Vulkan/ROCm, gfx1100); cube = NVIDIA RTX 4060 Ti (CUDA, always-on).
@@ -41,7 +65,8 @@ Pipeline: **whisper.cpp (Vulkan) → pyannote (ROCm) → overlap-align → Canon
   HF token in `.env.hf` (gitignored); gated model `pyannote/speaker-diarization-community-1` (accepted).
 - **LLM canonicalization (ADR-0006):** built, tested, **off by default** — low yield / high compute /
   mis-attribution risk. Opt-in via the profile `[llm]` stage. Superseded by enrollment as primary naming.
-- **Decisions:** ADRs `docs/architecture/0001–0016`. Naming strategy = ADR-0016.
+- **Decisions:** ADRs `docs/architecture/0001–0021`. Naming strategy = ADR-0016; client/server
+  architecture spine = ADR-0017–0021 (0021 Proposed/deferred, the rest Accepted).
 
 ## Gotchas learned (so we don't relearn them)
 - pyannote 4.x: load wav yourself (soundfile) + pass `{waveform, sample_rate}` to dodge the torchcodec
@@ -51,3 +76,11 @@ Pipeline: **whisper.cpp (Vulkan) → pyannote (ROCm) → overlap-align → Canon
   non-thinking + grammar is clean. Reasoning fixes cross-speaker attribution but costs ~3k tokens/call.
 - Makefile: no inline comments after `VAR ?= value` (trailing whitespace folds into the value).
 - uv + torch-ROCm: needs `index-strategy = "unsafe-best-match"` (triton-rocm vs PyPI).
+- **Two HTTP layers — don't conflate.** ADR-0004's OpenAI-compatible API is the *internal engine*
+  wire (in front of llama-swap). ADR-0018 is the *new client-facing* contract (audio→IR, SSE,
+  profile-by-name) that the Rust clients speak. Profiles are a **server-side allowlist** — clients
+  send a profile *name*, never a binary/model path.
+- **"spool" is two things:** client-side store-and-forward on the capture host (ADR-0012) vs. the
+  backend job queue + live audio buffer (ADR-0019). Different structures.
+- **Multi-user ≠ multi-tenant:** shared-backend fair-share is the *remote* case (ADR-0020); local
+  UDS is single-user (per-user socket + socket activation = one backend per OS user).
