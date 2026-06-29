@@ -33,8 +33,12 @@ def main() -> int:
         log("error: HF_TOKEN not set")
         return 2
 
+    import soundfile as sf
     import torch
     from pyannote.audio import Pipeline
+    from pyannote.audio.telemetry import set_telemetry_metrics
+
+    set_telemetry_metrics(False)  # don't phone home about a private audio pipeline
 
     pipeline = Pipeline.from_pretrained(args.model, token=token)
     if pipeline is None:
@@ -46,10 +50,18 @@ def main() -> int:
     pipeline.to(torch.device(device))
     log(f"diarizing on {device} with {args.model}")
 
-    diarization = pipeline(args.audio)
+    # Load the (already 16 kHz mono) wav ourselves and pass an in-memory waveform.
+    # Avoids pyannote 4.x's torchcodec-based file decoder entirely.
+    data, sample_rate = sf.read(args.audio, dtype="float32", always_2d=False)
+    waveform = torch.from_numpy(data)
+    waveform = waveform.unsqueeze(0) if waveform.ndim == 1 else waveform.T  # (channel, time)
+    output = pipeline({"waveform": waveform, "sample_rate": sample_rate})
+    # pyannote 4.x returns DiarizeOutput; .speaker_diarization is the full Annotation
+    # (keeps overlapping turns, so our alignment can flag secondary speakers).
+    annotation = output.speaker_diarization if hasattr(output, "speaker_diarization") else output
     turns = [
         {"start": round(segment.start, 3), "end": round(segment.end, 3), "label": str(speaker)}
-        for segment, _, speaker in diarization.itertracks(yield_label=True)
+        for segment, _, speaker in annotation.itertracks(yield_label=True)
     ]
     json.dump({"turns": turns, "device": device}, sys.stdout)
     sys.stdout.write("\n")

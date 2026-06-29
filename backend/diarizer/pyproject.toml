@@ -12,6 +12,7 @@ dependencies = [
     "torchaudio==2.10.0",
     "pyannote.audio>=4.0",
     "huggingface-hub>=0.27",
+    "soundfile>=0.12",
 ]
 
 # torch + transitive ROCm deps (triton-rocm) come from the PyTorch index; newer
