@@ -10,8 +10,11 @@ cell-phone conference (~2.5 min to process on the RX 7900 XTX).
 ```bash
 make install                 # uv sync + put `transcribbler` on ~/.local/bin (on PATH)
 transcribbler probe          # detect GPU backends (recommends vulkan here)
-transcribbler transcribe call.m4a -p profiles/desktop-vulkan.toml -f md -o call.md
+transcribbler transcribe call.m4a -f md -o call.md   # profile auto-selected by GPU
 transcribbler render call.ir.json -f vtt      # re-render an IR without re-transcribing
+# -p overrides: a bare name (desktop-vulkan / cube-cuda), a .toml path, or $TRANSCRIBBLER_PROFILE
+# --progress/--no-progress: live ASR/diar % to stderr (default: on when TTY)
+# --prompt "names, jargon": bias ASR spelling (or set [asr] prompt in the profile)
 make test | lint | check | validate-schemas | backend-smoke
 ```
 

@@ -34,20 +34,29 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
     if not audio.exists():
         print(f"error: audio not found: {audio}", file=sys.stderr)
         return 2
-    profile = profiles.load(args.profile)
+    try:
+        profile_path = profiles.resolve(args.profile)
+    except profiles.ProfileError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if not args.profile:
+        print(f"profile: {profile_path.stem} (auto; -p to override)", file=sys.stderr)
+    profile = profiles.load(profile_path)
     if not profile.asr.enabled:
         print(f"error: profile {profile.name!r} has no ASR stage", file=sys.stderr)
         return 2
 
+    progress = args.progress if args.progress is not None else sys.stderr.isatty()
+
     core = asr_core(profile.asr)
     print(f"[{profile.name}] {core.name} ({profile.asr.backend}) → {audio.name}", file=sys.stderr)
-    segments = core.transcribe(audio)
+    segments = core.transcribe(audio, progress=progress, prompt=args.prompt)
 
     diar_turns = None
     if profile.diar.enabled and not args.no_diarize:
         diarizer = diarizer_core(profile.diar)
         print(f"  diarizing: {diarizer.name} ({profile.diar.backend})", file=sys.stderr)
-        diar_turns = diarizer.diarize(audio)
+        diar_turns = diarizer.diarize(audio, progress=progress)
         print(f"  {len(diar_turns)} speaker turns", file=sys.stderr)
 
     ir = build_ir(segments, profile, audio, diar_turns=diar_turns)
@@ -85,13 +94,18 @@ def _emit(text: str, output: str | None, ir: dict) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="transcribbler", description="transcribbler compute backend")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub = parser.add_subparsers(dest="cmd")
 
     sub.add_parser("probe", help="detect available GPU backends").set_defaults(func=_cmd_probe)
 
     t = sub.add_parser("transcribe", help="transcribe a file to Canonical IR")
     t.add_argument("audio", help="audio/video file")
-    t.add_argument("-p", "--profile", required=True, help="path to a compute profile .toml")
+    t.add_argument(
+        "-p",
+        "--profile",
+        help="compute profile: a name (e.g. desktop-vulkan), a .toml path, or "
+        "$TRANSCRIBBLER_PROFILE; auto-selected by detected GPU if omitted",
+    )
     t.add_argument("-o", "--output", help="write here (default: stdout)")
     t.add_argument(
         "-f", "--format", choices=["json", "md", "vtt"], default="json", help="output format (default: json)"
@@ -101,6 +115,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     t.add_argument(
         "--no-canon", action="store_true", help="skip LLM speaker naming even if the profile enables it"
+    )
+    t.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="stream live ASR/diarization progress to stderr (default: on when stderr is a TTY)",
+    )
+    t.add_argument(
+        "--prompt",
+        help="initial prompt to bias ASR spelling (names, jargon); overrides the profile's [asr] prompt",
     )
     t.set_defaults(func=_cmd_transcribe)
 
@@ -114,6 +138,9 @@ def main(argv: list[str] | None = None) -> int:
 
     env.load_env_file()  # make HF_TOKEN etc. available to cores
     args = parser.parse_args(argv)
+    if not getattr(args, "func", None):  # bare `transcribbler` → help, not a traceback
+        parser.print_help()
+        return 0
     return args.func(args)
 
 

@@ -34,14 +34,23 @@ class SpeakerTurn:
 class ASRCore(Protocol):
     name: str
 
-    def transcribe(self, audio_path: Path) -> list[Segment]:
-        """Transcribe a normalized audio file into chronological segments."""
+    def transcribe(
+        self, audio_path: Path, *, progress: bool = False, prompt: str | None = None
+    ) -> list[Segment]:
+        """Transcribe a normalized audio file into chronological segments.
+
+        When ``progress`` is set, the core may stream live progress to stderr.
+        ``prompt`` is an optional initial prompt biasing decoding (names/jargon).
+        """
         ...
 
 
 class DiarizerCore(Protocol):
     name: str
 
-    def diarize(self, audio_path: Path) -> list[SpeakerTurn]:
-        """Diarize a normalized audio file into speaker turns over the whole file."""
+    def diarize(self, audio_path: Path, *, progress: bool = False) -> list[SpeakerTurn]:
+        """Diarize a normalized audio file into speaker turns over the whole file.
+
+        When ``progress`` is set, the core may stream live progress to stderr.
+        """
         ...
