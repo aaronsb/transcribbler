@@ -21,6 +21,7 @@ Format: lightweight [MADR](https://adr.github.io/madr/)-style. One decision per 
 | [0012](0012-capture-store-and-forward.md) | Capture store-and-forward spool | Proposed |
 | [0013](0013-retention-and-consent.md) | Retention, deletion & third-party consent | Proposed |
 | [0014](0014-ir-epoch-session-identity.md) | IR epoch/session identity & deterministic merge | Deferred |
+| [0015](0015-pluggable-compute-backends.md) | Pluggable compute backends — swapping GPUs via wire seam + compute profiles | Accepted |
 
 ## Conventions
 

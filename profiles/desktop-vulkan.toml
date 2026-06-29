@@ -1,0 +1,19 @@
+# Compute profile (ADR-0015): AMD desktop, Vulkan-portable default.
+# Profiles are host-specific by design — paths point at locally-built engines.
+name = "desktop-vulkan"
+idle_ttl_s = 300
+
+[asr]
+engine = "whisper.cpp"
+backend = "vulkan"                                              # runs on the RX 7900 XTX (and any Vulkan GPU)
+binary = "/home/aaron/Projects/ai/whisper.cpp/build/bin/whisper-cli"
+model = "/home/aaron/Projects/ai/whisper.cpp/models/ggml-base.en.bin"
+
+[diar]
+engine = "none"                                                # diarization arrives in a later stage (ADR-0005)
+
+[llm]
+engine = "llama.cpp"
+backend = "vulkan"
+binary = "/usr/bin/llama-server"
+# model = "..."                                                # canonicalization model, wired in a later stage
