@@ -23,6 +23,7 @@ Format: lightweight [MADR](https://adr.github.io/madr/)-style. One decision per 
 | [0014](0014-ir-epoch-session-identity.md) | IR epoch/session identity & deterministic merge | Deferred |
 | [0015](0015-pluggable-compute-backends.md) | Pluggable compute backends — swapping GPUs via wire seam + compute profiles | Accepted |
 | [0016](0016-speaker-naming-strategy.md) | Speaker naming strategy — voiceprint enrollment primary; LLM optional | Accepted |
+| [0017](0017-rust-clients-python-service.md) | Rust single-binary clients over a Python backend service | Proposed |
 
 ## Conventions
 
