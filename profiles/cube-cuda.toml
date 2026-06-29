@@ -1,0 +1,21 @@
+# Compute profile (ADR-0015): cube (NVIDIA RTX 4060 Ti, CUDA). EXAMPLE — paths TBD.
+# Same shape as desktop-vulkan; only engine builds/backends differ. This is what
+# "swap GPUs = swap a profile" looks like: the CLI/IR are identical.
+name = "cube-cuda"
+idle_ttl_s = 300
+
+[asr]
+engine = "whisper.cpp"
+backend = "cuda"
+binary = "/opt/whisper.cpp/build/bin/whisper-cli"              # built with -DGGML_CUDA=1
+model = "/opt/models/ggml-large-v3.bin"
+
+[diar]
+engine = "pyannote"                                            # CUDA makes the PyTorch diarizer first-class
+backend = "cuda"
+model = "pyannote/speaker-diarization-community-1"
+
+[llm]
+engine = "llama.cpp"
+backend = "cuda"
+binary = "/usr/bin/llama-server"
