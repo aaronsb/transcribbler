@@ -54,9 +54,9 @@ constant — 16GB on cube, 24GB on the desktop, and *less* when a game is reside
 A job that doesn't fit **queues** (persisted via the spool) rather than OOM-failing;
 it is admitted later when VRAM frees.
 
-### Concurrency — serial + pipelined by default
+### Concurrency — serial + pipelined by default (batch mode)
 
-One heavy GPU job at a time, but **overlap stages** (ASR of the next chunk/job while
+In **batch mode**, one heavy GPU job at a time, but **overlap stages** (ASR of the next chunk/job while
 diarization of the current runs) and **overlap CPU/IO** (ffmpeg normalize, `yt-dlp`
 downloads) with GPU work. True N-way GPU parallelism is **opt-in, only with measured
 headroom** (small models, or the 24GB card running ASR+diarize concurrently) —
@@ -79,20 +79,34 @@ authenticates — [ADR-0020](0020-remote-access-security.md)). The queue is ther
 This is what makes a single backend usable by several trusted people/devices at once
 (multi-user, not multi-tenant — ADR-0020).
 
-### Priority — drain-and-suspend
+### Modes — a "partial singleton": live preempts batch wholesale
 
-When **any** live session starts while batch is running:
+The scheduler is in one of three modes: **idle** → **batch** (draining the queue) →
+**live** (one or more live sessions active). Entering live mode *is* the priority rule.
 
-1. Stop **admitting** new batch work.
-2. Let the in-flight batch unit **finish its current chunk** (bounded wait — one
-   chunk, not one whole file, thanks to ADR-0005), then **suspend** the batch job
-   (its progress is spooled).
-3. Free the VRAM and give the GPU to live.
+**Why live mode can host several sessions at once.** Live audio arrives as **small,
+silence-bounded chunks** (sentence/paragraph-sized — not so small that overhead
+dominates, not so large that latency suffers). Each chunk transcribes in a *fraction*
+of its own duration, so one live session leaves the GPU **idle between chunks**. That
+slack is the budget for a *second* and *third* live session: the scheduler **"nices"**
+live work, fair-sharing the GPU across whichever session's chunk is ready, and they
+interleave in each other's gaps. Same-profile live sessions also **share one resident
+model set** (load once, multiplex chunks) — a new live participant costs *throughput*,
+not another copy of the models in VRAM.
 
-No work is killed; live waits at most a chunk's worth of drain. When live ends, the
-suspended batch job **resumes** from its next chunk. Among **multiple** live sessions
-that can't all stay real-time, the GPU is **fair-shared** and each session's audio
-keeps spooling — slower text, never lost audio.
+**Batch is frozen for the whole duration of live mode.** When the first live session
+starts, in-flight batch **drains to its next chunk boundary and suspends** (work-unit
+= ADR-0005 chunk — bounded wait), and the batch queue is **not drained again until the
+last live session closes**. Batch is deliberately *not* interleaved into live's slack:
+a batch work-unit (a 30s ASR window, a whole-file diarize) is too **coarse** to fit
+between live chunks without blowing live's latency budget, so it yields wholesale
+rather than risk live responsiveness. When the last live session ends, the server
+leaves live mode and resumes draining batch (or goes idle → unload).
+
+The "partial singleton": the server holds a single *mode*, but live mode admits
+multiple participants. Live always wins; batch always waits. No work is killed; under
+live oversubscription each session's audio keeps **spooling** — slower text, never
+lost audio.
 
 ### Lifecycle (extends ADR-0018)
 
@@ -134,9 +148,15 @@ backend owns its own queue first.
   (a tunable, not the default).
 - Suspend/resume requires batch jobs to be genuinely chunk-resumable end to end
   (ASR chunks + global diarize re-run or cached) — a constraint on the pipeline.
-- Multiple concurrent live sessions multiply VRAM pressure (each holds a model set
-  loaded); the spool keeps audio safe, but sustained real-time for *many* live streams
-  on one GPU is not guaranteed.
+- Multiple **same-profile** live sessions share the resident model set (cheap), but
+  **different-profile** live sessions each need their own models loaded (VRAM cost),
+  and sustained real-time for *many* live streams on one GPU is throughput-bounded —
+  the spool keeps audio safe, but text can lag.
+- **A long-running live session defers all batch for its entire duration** (an all-day
+  meeting freezes the batch queue). Accepted: batch is "whenever," live is interactive.
+  A future safety valve could lend live's idle slack to *small* batch units, but coarse
+  batch work-units make that risky for live latency — so the simple rule is "no batch
+  during live mode."
 
 ## Alternatives considered
 
