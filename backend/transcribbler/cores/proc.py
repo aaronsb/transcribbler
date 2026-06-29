@@ -37,25 +37,43 @@ def run_streamed(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",  # never let a stray byte crash the pump (C-locale hosts)
         env=env,
     )
     tail_buf: deque[str] = deque(maxlen=tail)
+    open_line = False  # last streamed write left the line open (\r, no newline)
 
     def pump() -> None:
+        nonlocal open_line
         assert proc.stderr is not None
         for line in proc.stderr:
             tail_buf.append(line)
             if not stream:
                 continue
-            shown = line if on_line is None else on_line(line)
+            try:
+                shown = line if on_line is None else on_line(line)
+            except Exception:
+                shown = line  # a renderer bug must never stall the stderr drain
             if shown:
                 sys.stderr.write(shown)
                 sys.stderr.flush()
+                open_line = not shown.endswith("\n")
 
     pump_thread = threading.Thread(target=pump, daemon=True)
     pump_thread.start()
-    assert proc.stdout is not None
-    out = proc.stdout.read()
-    proc.wait()
-    pump_thread.join()
-    return proc.returncode, out, "".join(tail_buf)
+    try:
+        assert proc.stdout is not None
+        out = proc.stdout.read()
+        rc = proc.wait()
+        pump_thread.join()
+    except BaseException:  # main-thread error / KeyboardInterrupt: don't orphan the child
+        proc.kill()
+        proc.wait()
+        pump_thread.join()
+        raise
+    finally:
+        if stream and open_line:  # close a dangling `\r ...N%` so later output isn't glued on
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+    return rc, out, "".join(tail_buf)

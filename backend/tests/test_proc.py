@@ -43,6 +43,32 @@ def test_on_line_filters_what_streams(capsys):
     assert "drop me" not in captured.err
 
 
+def test_on_line_exception_degrades_to_passthrough(capsys):
+    # A renderer that raises must not stall the stderr drain (would deadlock the
+    # child on a full pipe); it falls back to writing the raw line.
+    def boom(_ln):
+        raise ValueError("renderer bug")
+
+    rc, _out, _tail = run_streamed(
+        [sys.executable, "-c", "import sys; sys.stderr.write('hello\\n')"],
+        stream=True,
+        on_line=boom,
+    )
+    assert rc == 0
+    assert "hello" in capsys.readouterr().err
+
+
+def test_dangling_progress_line_gets_closed(capsys):
+    # A `\r`-style progress write with no trailing newline is closed off so the
+    # next output isn't glued onto it.
+    run_streamed(
+        [sys.executable, "-c", "import sys; sys.stderr.write('x\\n')"],
+        stream=True,
+        on_line=lambda ln: "\r  ASR  50%",  # never newline-terminated
+    )
+    assert capsys.readouterr().err.endswith("\n")
+
+
 def test_asr_renderer_parses_and_dedupes():
     render = asr_renderer()
     assert render("whisper_print_progress_callback: progress =  10%") == "\r  ASR  10%"

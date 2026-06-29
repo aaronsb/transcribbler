@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -40,7 +41,8 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
     if not args.profile:
-        print(f"profile: {profile_path.stem} (auto; -p to override)", file=sys.stderr)
+        src = "$TRANSCRIBBLER_PROFILE" if os.environ.get("TRANSCRIBBLER_PROFILE") else "auto"
+        print(f"profile: {profile_path.stem} ({src}; -p to override)", file=sys.stderr)
     profile = profiles.load(profile_path)
     if not profile.asr.enabled:
         print(f"error: profile {profile.name!r} has no ASR stage", file=sys.stderr)

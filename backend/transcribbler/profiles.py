@@ -99,7 +99,10 @@ def available() -> list[str]:
 
 
 def _looks_like_path(arg: str) -> bool:
-    return os.sep in arg or arg.endswith(".toml") or Path(arg).expanduser().exists()
+    # A selector is a path only if it says so structurally — a separator or a
+    # .toml suffix. (Don't probe the CWD: a bare name like "desktop-vulkan"
+    # must stay a name even if a same-named file happens to sit in the CWD.)
+    return os.sep in arg or arg.endswith(".toml")
 
 
 def resolve(arg: str | None) -> Path:
