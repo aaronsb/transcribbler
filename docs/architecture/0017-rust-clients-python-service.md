@@ -142,10 +142,9 @@ this ADR stays focused on the *language + boundary* decision.
   SSE progress, cancellation releasing the ADR-0011 lease, version handshake. It also
   resolves the local-vs-remote selection, autostart (socket activation), and
   persistence-ownership questions that were listed here.
-- **Remote auth/authz → a security ADR.** ADR-0018 fixes the *transport-derived*
-  model (UDS = OS perms; TCP = bearer token over TLS); token lifecycle/rotation, the
-  threat model, and mTLS still want a dedicated security ADR. Intersects consent/
-  retention (ADR-0013).
+- **Remote auth/authz → [ADR-0020](0020-remote-access-security.md)** (now drafted):
+  per-locality access tiers (UDS / SSH tunnel / authed cloud-worker / direct-TCP with
+  bearer+mTLS), backend never public by default, cloud tier opt-in with consent.
 - **Transition parity checklist.** Define concretely when the Rust CLI replaces the
   Python one. Risk: if the Python CLI stays the *in-process* path, the reference
   implementation never exercises the wire — mitigate with a thin Python wire-client
@@ -183,5 +182,6 @@ this ADR stays focused on the *language + boundary* decision.
   ADR-0005 + ADR-0013/0014 (persistence ownership), ADR-0011 (lease vs cancellation),
   ADR-0013 (consent vs remote auth).
 - [ADR-0018](0018-client-facing-wire.md) (the client-facing wire contract this
-  decision serves); forthcoming: a **security/auth** ADR.
+  decision serves), [ADR-0019](0019-job-scheduling.md) (scheduling),
+  [ADR-0020](0020-remote-access-security.md) (remote access & security).
 - Prior art: `whisper-client` (Rust CLI), `whisper-service` (Python backend).

@@ -141,6 +141,7 @@ source of truth and lives on the backend.
   ADR-0006 (the IR carried), ADR-0007 (supervision / TLS termination),
   ADR-0011 (lease released on cancel), ADR-0012 (server-owned spool/jobs),
   ADR-0013/0014 (retention, persistence, deletion), ADR-0002 (independent host deploys).
-- Forthcoming: a **security/auth ADR** (token lifecycle, threat model, mTLS) and a
-  **live audio ingest** path for the capture daemon (streaming body / WebSocket
-  upgrade — also transport-agnostic), deferred to the capture-daemon ADR.
+- [ADR-0020](0020-remote-access-security.md) (remote access tiers + auth that secure
+  the TCP transport defined here); forthcoming: a **live audio ingest** path for the
+  capture daemon (streaming body / WebSocket upgrade — also transport-agnostic),
+  deferred to the capture-daemon ADR.
