@@ -3,6 +3,7 @@
 One place for "normalize to 16 kHz mono WAV" — the form both whisper.cpp and
 pyannote expect. Shared so cores don't each reimplement it.
 """
+
 from __future__ import annotations
 
 import subprocess

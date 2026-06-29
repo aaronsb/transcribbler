@@ -9,16 +9,17 @@ isn't backed by the cited evidence is dropped.
 
 Pure/deterministic (the LLM call lives in the core); golden-file testable.
 """
+
 from __future__ import annotations
 
 import re
 
 SYSTEM_PROMPT = (
     "You map diarized speaker ids (S1, S2, ...) to real names/roles using ONLY evidence "
-    "present in the transcript. A speaker may be named by SELF-introduction (\"I'm Bob\") "
-    "OR by another speaker addressing/mentioning them (\"thanks, Bob\"; \"what do you think, "
-    "Sarah?\"; \"you've been listening to X\"). Use who-addresses-whom to attribute names to "
-    "the right id. If a speaker's name is not determinable, leave display_name empty (\"\"). "
+    'present in the transcript. A speaker may be named by SELF-introduction ("I\'m Bob") '
+    'OR by another speaker addressing/mentioning them ("thanks, Bob"; "what do you think, '
+    'Sarah?"; "you\'ve been listening to X"). Use who-addresses-whom to attribute names to '
+    'the right id. If a speaker\'s name is not determinable, leave display_name empty (""). '
     'Every speaker_map entry MUST include an "evidence" field quoting the exact transcript '
     "text (verbatim, appears above) that justifies it. Do not guess names not in the text. "
     "Leave term_map empty []."
@@ -39,7 +40,9 @@ def _tokens(text: str) -> list[str]:
     return _normalize(text).split()
 
 
-_NAME_MENTION = re.compile(r"\b(?:thanks|thank you|hey|hi|welcome|listening to|i'?m|i am|this is|my name is)\b", re.I)
+_NAME_MENTION = re.compile(
+    r"\b(?:thanks|thank you|hey|hi|welcome|listening to|i'?m|i am|this is|my name is)\b", re.I
+)
 
 
 def build_evidence(ir: dict, char_budget: int = 6000) -> str:
@@ -50,7 +53,7 @@ def build_evidence(ir: dict, char_budget: int = 6000) -> str:
     + turns that look like they mention/address a name — the places identities surface.
     """
     ids = [s["id"] for s in ir["speakers"]]
-    lines = [f'[{t["speaker_id"]}] ({t["start"]:.0f}s) {t["text"].strip()}' for t in ir["turns"]]
+    lines = [f"[{t['speaker_id']}] ({t['start']:.0f}s) {t['text'].strip()}" for t in ir["turns"]]
     full = "\n".join(lines)
 
     if len(full) <= char_budget:
@@ -73,7 +76,8 @@ def build_evidence(ir: dict, char_budget: int = 6000) -> str:
 
     return (
         f"Identify these diarized speakers: {', '.join(ids)}.\n\n"
-        "Transcript (speaker-tagged):\n" + body
+        "Transcript (speaker-tagged):\n"
+        + body
         + "\n\nProduce speaker_map (each entry's evidence must be a quote that appears "
         "verbatim above) and an empty term_map."
     )
@@ -89,9 +93,7 @@ def evidence_supported(quote: str, speaker_text: str) -> bool:
     return hits / len(q) >= EVIDENCE_SUPPORT_THRESHOLD
 
 
-def apply_canonicalization(
-    ir: dict, data: dict, *, min_confidence: float = MIN_CONFIDENCE
-) -> dict:
+def apply_canonicalization(ir: dict, data: dict, *, min_confidence: float = MIN_CONFIDENCE) -> dict:
     """Apply verified speaker names to the IR's speakers (pure; returns a new dict).
 
     A name is applied only when: display_name is non-empty, confidence >= threshold,

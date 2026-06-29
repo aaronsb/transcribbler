@@ -1,4 +1,5 @@
 """build_ir produces schema-valid IR in both ASR-only and diarized modes."""
+
 from __future__ import annotations
 
 from transcribbler.cores.base import Segment, SpeakerTurn

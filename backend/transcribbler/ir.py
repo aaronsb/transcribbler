@@ -4,6 +4,7 @@ This first slice is ASR-only: with no diarization, every turn is attributed to a
 single fallback speaker. When a diarizer is wired in, speaker assignment becomes
 the overlap-alignment step (ADR-0005); the IR shape does not change.
 """
+
 from __future__ import annotations
 
 import hashlib

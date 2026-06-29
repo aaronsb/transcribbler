@@ -3,6 +3,7 @@
 Loads `KEY=VALUE` lines from a dotenv file into os.environ (without overwriting
 values already set). Kept tiny and dependency-free; the file itself is gitignored.
 """
+
 from __future__ import annotations
 
 import os

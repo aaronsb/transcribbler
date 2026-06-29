@@ -3,6 +3,7 @@
 Deliberately tiny so engines stay swappable. An ASR core turns audio into
 time-stamped text segments; it knows nothing about diarization, the IR, or HTTP.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ class SpeakerTurn:
     `label` is the engine's *local* speaker id (e.g. "0", "SPEAKER_01"); it is
     mapped to a canonical, recording-wide id (S1, S2, ...) during alignment.
     """
+
     start: float
     end: float
     label: str

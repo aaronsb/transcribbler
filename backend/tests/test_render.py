@@ -1,4 +1,5 @@
 """Tests for IR renderers (md/vtt). Pure views over the IR."""
+
 from __future__ import annotations
 
 import pytest
@@ -28,10 +29,10 @@ def test_ts_formats_hms_millis():
 
 def test_markdown_uses_name_or_id_and_groups_consecutive():
     md = to_markdown(IR)
-    assert "**Alan** [00:00:00.000]" in md      # named speaker resolved
-    assert "hello again" in md                  # consecutive S1 turns merged
-    assert "**S2** [00:00:04.000]" in md        # unnamed falls back to id
-    assert "Alan (host)" in md                  # role shown in header
+    assert "**Alan** [00:00:00.000]" in md  # named speaker resolved
+    assert "hello again" in md  # consecutive S1 turns merged
+    assert "**S2** [00:00:04.000]" in md  # unnamed falls back to id
+    assert "Alan (host)" in md  # role shown in header
 
 
 def test_vtt_has_header_and_voice_tags():

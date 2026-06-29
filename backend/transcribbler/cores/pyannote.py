@@ -5,6 +5,7 @@ so torch never enters the main backend. Normalizes audio to 16 kHz mono first,
 invokes the sidecar, and parses its JSON into SpeakerTurns. The HF token is
 passed through the environment.
 """
+
 from __future__ import annotations
 
 import json
@@ -37,14 +38,20 @@ class PyannoteCore:
             wav = normalize_wav(audio_path, Path(tmp) / "norm.wav")
             payload = self._run_sidecar(wav)
         return [
-            SpeakerTurn(start=t["start"], end=t["end"], label=t["label"])
-            for t in payload.get("turns", [])
+            SpeakerTurn(start=t["start"], end=t["end"], label=t["label"]) for t in payload.get("turns", [])
         ]
 
     def _run_sidecar(self, wav: Path) -> dict:
         cmd = [
-            "uv", "run", "--project", str(_SIDECAR_DIR),
-            "python", str(_SIDECAR_SCRIPT), str(wav), "--model", self.model,
+            "uv",
+            "run",
+            "--project",
+            str(_SIDECAR_DIR),
+            "python",
+            str(_SIDECAR_SCRIPT),
+            str(wav),
+            "--model",
+            self.model,
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True, env=os.environ.copy())
         if proc.returncode != 0:
