@@ -14,10 +14,14 @@ from __future__ import annotations
 import re
 
 SYSTEM_PROMPT = (
-    "You map diarized speaker ids to real names/roles using ONLY evidence present in "
-    "the transcript. If a speaker's name is not stated in the text, leave display_name "
-    'empty (""). Every speaker_map entry MUST include an "evidence" field quoting the '
-    "exact transcript text that justifies the name/role. Do not guess. Leave term_map empty []."
+    "You map diarized speaker ids (S1, S2, ...) to real names/roles using ONLY evidence "
+    "present in the transcript. A speaker may be named by SELF-introduction (\"I'm Bob\") "
+    "OR by another speaker addressing/mentioning them (\"thanks, Bob\"; \"what do you think, "
+    "Sarah?\"; \"you've been listening to X\"). Use who-addresses-whom to attribute names to "
+    "the right id. If a speaker's name is not determinable, leave display_name empty (\"\"). "
+    'Every speaker_map entry MUST include an "evidence" field quoting the exact transcript '
+    "text (verbatim, appears above) that justifies it. Do not guess names not in the text. "
+    "Leave term_map empty []."
 )
 
 # A proposed name is applied only if its confidence clears this AND its evidence
@@ -35,50 +39,44 @@ def _tokens(text: str) -> list[str]:
     return _normalize(text).split()
 
 
-def build_evidence(ir: dict, max_turns_per_speaker: int = 4, max_chars: int = 600) -> str:
-    """Compact, per-speaker representative turns for the LLM to name speakers from.
+_NAME_MENTION = re.compile(r"\b(?:thanks|thank you|hey|hi|welcome|listening to|i'?m|i am|this is|my name is)\b", re.I)
 
-    Picks the first turn (intros live here) plus the longest turns (substantive
-    statements), capped — keeps the prompt small enough for a local model.
+
+def build_evidence(ir: dict, char_budget: int = 6000) -> str:
+    """A chronological, speaker-tagged view so the model can attribute names across
+    speakers (who addresses whom), not just from self-introductions.
+
+    Whole transcript if it fits the budget; otherwise intros (head) + outros (tail)
+    + turns that look like they mention/address a name — the places identities surface.
     """
-    by_speaker: dict[str, list[dict]] = {}
-    for turn in ir["turns"]:
-        by_speaker.setdefault(turn["speaker_id"], []).append(turn)
+    ids = [s["id"] for s in ir["speakers"]]
+    lines = [f'[{t["speaker_id"]}] ({t["start"]:.0f}s) {t["text"].strip()}' for t in ir["turns"]]
+    full = "\n".join(lines)
 
-    blocks = []
-    for sid in (s["id"] for s in ir["speakers"]):
-        turns = by_speaker.get(sid, [])
-        if not turns:
-            continue
-        chosen = _representative(turns, max_turns_per_speaker)
-        lines = []
-        used = 0
-        for t in chosen:
-            line = f'- ({t["start"]:.0f}s) "{t["text"].strip()}"'
-            if used + len(line) > max_chars:
+    if len(full) <= char_budget:
+        body = full
+    else:
+        head, size = [], 0
+        for ln in lines:
+            if size + len(ln) > char_budget * 0.55:
                 break
-            lines.append(line)
-            used += len(line)
-        blocks.append(f"[{sid}] representative turns:\n" + "\n".join(lines))
+            head.append(ln)
+            size += len(ln)
+        mentions = [ln for t, ln in zip(ir["turns"], lines) if _NAME_MENTION.search(t["text"])][:40]
+        tail = lines[-8:]  # outros often name the speaker
+        seen, body_lines = set(), []
+        for ln in head + mentions + tail:
+            if ln not in seen:
+                seen.add(ln)
+                body_lines.append(ln)
+        body = "\n".join(body_lines)
 
     return (
-        "Diarized transcript excerpts (one block per speaker id):\n\n"
-        + "\n\n".join(blocks)
-        + "\n\nProduce speaker_map (each with an evidence quote) and an empty term_map."
+        f"Identify these diarized speakers: {', '.join(ids)}.\n\n"
+        "Transcript (speaker-tagged):\n" + body
+        + "\n\nProduce speaker_map (each entry's evidence must be a quote that appears "
+        "verbatim above) and an empty term_map."
     )
-
-
-def _representative(turns: list[dict], k: int) -> list[dict]:
-    first = turns[0]
-    longest = sorted(turns, key=lambda t: len(t["text"]), reverse=True)
-    chosen, seen = [first], {id(first)}
-    for t in longest:
-        if len(chosen) >= k:
-            break
-        if id(t) not in seen:
-            chosen.append(t)
-            seen.add(id(t))
-    return sorted(chosen, key=lambda t: t["start"])
 
 
 def evidence_supported(quote: str, speaker_text: str) -> bool:
@@ -97,27 +95,27 @@ def apply_canonicalization(
     """Apply verified speaker names to the IR's speakers (pure; returns a new dict).
 
     A name is applied only when: display_name is non-empty, confidence >= threshold,
-    and the cited evidence is supported by that speaker's actual turns. Otherwise the
-    speaker is left unchanged (fallback). term_map is intentionally not applied yet.
+    and the cited evidence appears verbatim *somewhere in the transcript* — so the model
+    cannot invent the naming statement, but may attribute a name stated by another
+    speaker (e.g. "thanks, Bob") to the right id. Otherwise the speaker is left unchanged
+    (fallback). term_map is intentionally not applied yet.
     """
-    speaker_text = {sid: "" for sid in (s["id"] for s in ir["speakers"])}
-    for t in ir["turns"]:
-        speaker_text[t["speaker_id"]] = speaker_text.get(t["speaker_id"], "") + " " + t["text"]
+    corpus = " ".join(t["text"] for t in ir["turns"])
 
     proposals = {e["id"]: e for e in data.get("speaker_map", [])}
     new_speakers = []
     for sp in ir["speakers"]:
         e = proposals.get(sp["id"])
         name = (e or {}).get("display_name", "").strip()
+        role = (e or {}).get("role", "").strip()
         conf = float((e or {}).get("confidence", 0.0))
-        if (
-            e
-            and name
-            and conf >= min_confidence
-            and evidence_supported(e.get("evidence", ""), speaker_text.get(sp["id"], ""))
-        ):
-            updated = {**sp, "display_name": name, "source": "llm", "confidence": round(conf, 3)}
-            role = e.get("role", "").strip()
+        verified = bool(e) and conf >= min_confidence and evidence_supported(e.get("evidence", ""), corpus)
+
+        if verified and (name or role):  # apply whichever attributes are present
+            updated = {**sp, "source": "llm"}
+            if name:
+                updated["display_name"] = name
+                updated["confidence"] = round(conf, 3)
             if role:
                 updated["role"] = role
             ev = e.get("evidence", "").strip()

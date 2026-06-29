@@ -30,6 +30,16 @@ def test_supported_name_is_applied():
     assert sp["display_name"] == "Alan Watts" and sp["source"] == "llm" and sp["role"] == "host"
 
 
+def test_third_person_naming_is_accepted():
+    # S1 is named by S2 addressing them; the quote lives in S2's turn (the transcript),
+    # not S1's own — B-with-guards accepts this, the common discussion case.
+    ir = _ir(("S1", 0, 4, "yes I can take that one"), ("S2", 4, 7, "thanks Bob go ahead"))
+    data = {"speaker_map": [{"id": "S1", "display_name": "Bob", "confidence": 0.8,
+                             "evidence": "thanks Bob"}], "term_map": []}
+    out = apply_canonicalization(ir, data)
+    assert out["speakers"][0]["display_name"] == "Bob" and out["speakers"][0]["source"] == "llm"
+
+
 def test_unsupported_evidence_is_rejected():
     # The model claims a name but cites evidence NOT in the speaker's turns -> reject.
     ir = _ir(("S1", 0, 4, "today we talk about the weather"))
