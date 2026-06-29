@@ -1,6 +1,6 @@
 # ADR-0020: Remote access & security — per-locality access tiers
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-06-29
 - **Deciders**: Aaron
 
@@ -60,8 +60,12 @@ GPU; only that deferred tier sends data off-machine.
   (deferred). The home GPU is never reached on that tier; it is the one path where data
   leaves the machines, so it is opt-in with consent.
 - **Direct public TCP is the discouraged advanced path**, for users who insist on
-  exposing a backend: bearer token over TLS (traefik terminates, ADR-0007), with
-  **mTLS client certs** as the hardening upgrade.
+  exposing a backend: bearer token over TLS, with **mTLS client certs** as the
+  hardening upgrade. TLS termination is **traefik on cube** (ADR-0007); on a **native
+  host** (the laptop/desktop, no traefik) there is no built-in terminator, so direct
+  TCP there means an operator-supplied cert / reverse proxy — which is exactly why
+  **SSH is the recommended path for reaching a non-cube backend** and direct TCP is
+  discouraged.
 
 **Token hygiene** (the bearer baseline, wherever used — direct TCP, client→worker):
 tokens are **per-client** (one device revocable without re-keying the rest),
@@ -77,10 +81,21 @@ Switching tiers is selecting an endpoint — no code path differs beyond the con
 
 The identity each tier already establishes **resolves to a principal (an account)** —
 the OS uid on UDS, the SSH user on a tunnel, the token/cert's account on direct TCP.
-**Every job is owned by the principal that submitted it.** This makes a single backend
-safely serve **several trusted accounts at once** — the scheduler tracks per-requester
-ownership ([ADR-0019](0019-job-scheduling.md)), a principal sees/cancels **its own**
-jobs, and queue-position is reported per requester.
+**Every job is owned by the principal that submitted it.**
+
+**Where multi-user actually applies:** the many-principals-share-one-backend case is
+the **remote** tier — a backend (typically the always-on cube) reached by several
+SSH-tunnelled / token clients. The **local UDS tier is single-user by construction**:
+the socket lives in a per-user `$XDG_RUNTIME_DIR` (0700) and socket activation spawns
+**one backend per OS user**, so two local users get two backends, not a shared one.
+Locally, then, the principal is just that user and fair-share across principals does
+not arise; the shared-models / fair-queue behavior of [ADR-0019](0019-job-scheduling.md)
+is a property of a *shared remote* backend.
+
+On a shared backend, a principal sees/cancels **only its own** jobs and queue-position
+is per requester. **This is enforced, not assumed:** the wire checks
+`caller-principal == job-owner` on every `/jobs/{id}` operation and uses unguessable
+ids (ADR-0018) — without that the soft boundary would leak transcripts by id guessing.
 
 This is **multi-user, not multi-tenant**: a known, trusted set of accounts (people /
 devices the operator controls) sharing one backend — *not* the public-signup,

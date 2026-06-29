@@ -1,6 +1,6 @@
 # ADR-0018: Client-facing wire — one HTTP contract over Unix-socket (local) and TCP (remote)
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-06-29
 - **Deciders**: Aaron
 
@@ -63,11 +63,18 @@ Because work outlives a request, the model is **jobs**, not a single blocking ca
 - `POST /v1/jobs` — submit audio (multipart: metadata + file) with a **profile name**
   (resolved server-side against the ADR-0017 allowlist — never a path), and flags
   (`diarize`, `canon`, `prompt`). Returns `202` + a job id.
-- `GET /v1/jobs/{id}/events` — **SSE** stream: `queued {position, ahead}` while it
-  waits in line (updated as the queue moves — [ADR-0019](0019-job-scheduling.md)) →
-  `progress {stage, completed, total}` once running → terminal `done {ir_ref}` or
-  `error {code, message}`. This is the wire form of the transport-agnostic progress
-  sink from ADR-0017 (PR #13 #4).
+- `GET /v1/jobs/{id}/events` — **SSE** stream. Non-terminal: `queued {position,
+  ahead}` while it waits in line (updated as the queue moves —
+  [ADR-0019](0019-job-scheduling.md)); `progress {stage, completed, total}` once
+  running; `paused {reason}` / `resumed` when a batch job yields to live mode and
+  later resumes (a job can sit `paused` for hours, so this is an explicit observable
+  state, not silent stalling). Terminal: `done {ir_ref}` | `error {code, message}` |
+  `canceled {by}`. The terminal set matches ADR-0019's lifecycle exactly
+  (`done`/`error`/`canceled`); `error.code` is an enumerated set — at minimum
+  `oom`, `wont_fit` (admission can never satisfy the request), `auth`,
+  `bad_input`, `internal` — so a client can react (retry vs give up vs re-auth)
+  rather than parse a message string. This is the wire form of the transport-agnostic
+  progress sink from ADR-0017 (PR #13 #4).
 - `GET /v1/jobs/{id}` — job state + the Canonical IR when complete.
 - `GET /v1/jobs/{id}/result?format=md|vtt|json` — **server-side render**, so a
   `curl`/non-Rust client gets a readable view without reimplementing render.
@@ -79,14 +86,23 @@ Because work outlives a request, the model is **jobs**, not a single blocking ca
 A one-shot CLI is sugar over this (submit → stream events → fetch result/render),
 hidden behind the client so trivial use is one command.
 
-**Client disconnect does not cancel a job** — the job persists (spool, ADR-0012);
-the client can reconnect to `/events` or poll `/jobs/{id}`. Only an explicit
-`DELETE` cancels and frees the lease.
+**Every `/jobs/{id}` operation (read, events, result, DELETE) enforces
+`caller-principal == job-owner`** (the principal from [ADR-0020](0020-remote-access-security.md)),
+and **job ids are unguessable (UUIDs)**. This is what makes "a principal sees/cancels
+only its own jobs" actually hold — without the ownership check + opaque ids, the
+soft multi-user boundary (ADR-0020) would leak transcript content via id enumeration.
+
+**Client disconnect does not cancel a job** — the job persists in the backend's
+job store (distinct from the *client-side* ADR-0012 spool); the client can reconnect
+to `/events` or poll `/jobs/{id}`. Only an explicit `DELETE` cancels and releases this
+session's lease hold.
 
 ### Persistence ownership (resolves an ADR-0017 open question)
 
 The **server owns the canonical store** — job state and the IR — because async +
-disconnect-survival + the spool require it (ADR-0012/0013/0014). **Render is a view,
+disconnect-survival require a server-side job store (retention/identity per
+ADR-0013/0014; this is the backend's store, distinct from the client-side ADR-0012
+spool). **Render is a view,
 offered both server-side (`?format=`) and client-side (Rust)**; either is cheap and
 stateless. Clients may also save a rendered file locally (`-o`), but the IR is the
 source of truth and lives on the backend.
@@ -94,9 +110,14 @@ source of truth and lives on the backend.
 ### Versioning
 
 - **Major version in the path** (`/v1`); a client refuses an unknown major.
-- `GET /v1/version` returns `{wire_version, capabilities}` so a client and a
-  backend deployed independently across hosts (ADR-0002) detect mismatch and degrade
-  gracefully. Additive (minor) changes stay backward compatible.
+- `GET /v1/version` returns `{wire_version, ir_schema_version, capabilities}` so a
+  client and a backend deployed independently across hosts (ADR-0002) detect mismatch
+  and degrade gracefully. Additive (minor) changes stay backward compatible.
+- **`wire_version` covers the *endpoints/events*; `ir_schema_version` (the ADR-0006
+  IR `schema_version`) is reported separately** and checked too — because the Rust
+  client codegens its IR types from `schemas/` (ADR-0017), a backend that bumps the IR
+  schema without the client knowing would silently mis-parse. The handshake surfaces
+  both so neither can drift unnoticed.
 
 ## Consequences
 

@@ -1,6 +1,6 @@
 # ADR-0017: Rust single-binary clients over a Python backend service
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-06-29
 - **Deciders**: Aaron
 
@@ -66,11 +66,12 @@ ADR — see Open questions.
   ADR-0007. This is *not* OpenAI-shaped; it consumes ADR-0004's OpenAI engine wire
   internally rather than re-exposing it. Progress is **streamed over the wire**
   (chunked / SSE), not just to a local stderr.
-- **Client (Rust):** HTTP + JSON IR + **render** (md/vtt/json — no GPU, so it is
-  pure client-side) + UX (argument parsing, the live progress *display*, the tray
-  surface, PipeWire capture). The CLI-ergonomics behavior already built in Python
-  (auto-profile, `--progress`, `--prompt`) is the **behavioral spec the Rust CLI
-  mirrors**.
+- **Client (Rust):** HTTP + JSON IR + **render** (md/vtt/json — no GPU needed) + UX
+  (argument parsing, the live progress *display*, the tray surface, PipeWire capture).
+  Render runs client-side, but is **also offered server-side** for thin/non-Rust
+  clients ([ADR-0018](0018-client-facing-wire.md) `?format=`); the IR is the source of
+  truth either way. The CLI-ergonomics behavior already built in Python (auto-profile,
+  `--progress`, `--prompt`) is the **behavioral spec the Rust CLI mirrors**.
 
 **Wire / contract details (folding in PR #13 review findings):**
 

@@ -1,8 +1,15 @@
 # ADR-0015: Pluggable compute backends — swapping GPUs via wire seam + compute profiles
 
-- **Status**: Accepted
+- **Status**: Accepted (client-wire seam refined by [ADR-0017](0017-rust-clients-python-service.md)/[ADR-0018](0018-client-facing-wire.md))
 - **Date**: 2026-06-28
 - **Deciders**: Aaron
+
+> **Note (2026-06-29):** Seam 1 here says clients speak "OpenAI-compatible HTTP."
+> [ADR-0017](0017-rust-clients-python-service.md) refines this: the *client-facing*
+> seam is a distinct contract ([ADR-0018](0018-client-facing-wire.md)); OpenAI-
+> compatible HTTP is the *internal engine* wire (ADR-0004). The two-seam GPU-swap
+> idea (wire + compute profiles) is unchanged — and a cloud backend reached via
+> [ADR-0021](0021-internet-cloud-worker.md) is exactly "another backend behind the seam."
 
 ## Context
 

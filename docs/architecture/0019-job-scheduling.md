@@ -1,6 +1,6 @@
 # ADR-0019: Job scheduling — admission, concurrency, and live priority
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-06-29
 - **Deciders**: Aaron
 
@@ -23,9 +23,11 @@ Two facts shape the design:
   chunk ASR). So a batch job has a natural **work-unit (a chunk)** — a safe boundary
   to suspend at and resume from. (`whisper-cli` can't be checkpointed mid-call, but
   it *can* be stopped between chunks.)
-- **The spool already persists work** ([ADR-0012](0012-capture-store-and-forward.md)).
-  The queue is not new infrastructure — it *is* the spool, given ordering and
-  admission.
+- **Durable buffering is already a theme.** This ADR's **server-side job queue + live
+  audio buffer** lives on the *backend*. It is a sibling of — **not** the same thing as
+  — the *client-side* store-and-forward spool ([ADR-0012](0012-capture-store-and-forward.md)),
+  which buffers on the *capture host* and drains to the backend. Same idea (durable
+  buffer so nothing is lost), two locations; this ADR owns the server-side one.
 
 ## Decision
 
@@ -49,8 +51,11 @@ lifecycle with admission, a queue, and priority.
 ### Admission control — by VRAM budget
 
 A job is **admitted only if its profile's model set fits the device's free VRAM**
-(whisper + maybe pyannote + maybe llama). Capacity is **read from the device**, not a
-constant — 16GB on cube, 24GB on the desktop, and *less* when a game is resident.
+(whisper + maybe pyannote + maybe llama). Throughout this ADR "profile" means the
+**compute profile** ([ADR-0015](0015-pluggable-compute-backends.md): which engines/
+models on which device) — not the *cadence* profile (ADR-0009: session vs turn epoch),
+which is a separate axis. Capacity is **read from the device**, not a constant —
+16GB on cube, 24GB on the desktop, and *less* when a game is resident.
 A job that doesn't fit **queues** (persisted via the spool) rather than OOM-failing;
 it is admitted later when VRAM frees.
 
@@ -70,14 +75,23 @@ authenticates — [ADR-0020](0020-remote-access-security.md)). The queue is ther
 **per-requester aware**, not a single anonymous line:
 
 - A principal can list/cancel **its own** jobs; it does not see others' content.
-- Scheduling within the batch class is **fair across requesters** (round-robin over
-  owners), so one account's 400-file backlog can't starve another's single file.
-- The client is told its **position** — the wire (ADR-0018) emits a `queued
-  {position, ahead}` event, updated as the line moves: *"3 jobs ahead of you" → 2 → 1
-  → running*. This is the same SSE stream that later carries progress.
+  (Enforcement: the wire verifies `caller-principal == job-owner` on every
+  `/jobs/{id}` op and uses unguessable ids — ADR-0018.)
+- Batch ordering is **FIFO within an owner, round-robin across owners**: each owner's
+  jobs run in submission order, but the scheduler rotates between owners so one
+  account's 400-file backlog can't starve another's single file.
+- The client is told its place via the wire's `queued {position, ahead}` event
+  (ADR-0018), updated as the line moves: *"3 jobs ahead of you" → 2 → 1 → running*.
+  `ahead` is the **effective** count given round-robin fairness (how many jobs will
+  actually run before yours), which is why it is reported rather than left for the
+  client to infer from a raw position.
 
 This is what makes a single backend usable by several trusted people/devices at once
-(multi-user, not multi-tenant — ADR-0020).
+(multi-user, not multi-tenant — ADR-0020). **This shared-backend, many-principal
+scenario is the *remote* case** — a backend (typically cube) serving SSH-tunnelled /
+token clients. The *local* UDS tier is single-user by construction (a per-user socket
+under `$XDG_RUNTIME_DIR`, one backend per OS user via socket activation — ADR-0018),
+so its principal is simply that user; fair-share across principals doesn't arise there.
 
 ### Modes — a "partial singleton": live preempts batch wholesale
 
@@ -108,13 +122,38 @@ multiple participants. Live always wins; batch always waits. No work is killed; 
 live oversubscription each session's audio keeps **spooling** — slower text, never
 lost audio.
 
+### Live mode and the two-tier model (ADR-0005)
+
+[ADR-0005](0005-diarization-flow.md) splits live into **two tiers**: a fast streaming
+**preview** (low-fidelity, e.g. Streaming Sortformer / WhisperLiveKit) and an offline
+**canonical re-run** (pyannote + whisper) on segment finalize that produces the
+source-of-truth IR. The scheduler treats them as follows:
+
+- **The "resident model set" is the host's live engine.** Where a fast preview engine
+  exists (Sortformer is **CUDA-only**, so cube), that is the shared, in-slack set.
+  Portable hosts (the Vulkan/ROCm desktop — ADR-0015/0002) have **no Sortformer**, so
+  "live" there is **chunked near-real-time canonical** at the turn-epoch cadence
+  ([ADR-0009](0009-capture-cadence.md)) rather than a separate preview tier. Live
+  preview is thus a backend *capability*, advertised via the wire's `capabilities`
+  (ADR-0018), not a guarantee.
+- **The canonical re-run is live-class work, not third-party batch.** It is part of
+  the live session's own output, so it runs *within* live mode (in the slack, below
+  preview but above frozen batch). Consequence: a long live session yields canonical
+  IR **incrementally per finalized segment**, not only when the meeting ends — it is
+  not subject to the "batch frozen for the whole session" rule.
+- **Admission budgets both tiers.** The VRAM/throughput budget must account for the
+  preview set *and* the canonical re-run, not preview alone — otherwise a live session
+  is admitted that can't actually keep up with its own re-runs.
+
 ### Lifecycle (extends ADR-0018)
 
 `queued` (admitted-pending-resources) → `running` → optional `paused`
-(batch yielded to live) → `done` / `failed` / `canceled`. Live always outranks batch;
-within the batch class, ordering is FIFO **fair across requesters** (no single owner
-starves the rest). Empty queue **and** no live session → idle TTL → unload
-(ADR-0011), freeing the GPU for games/other work — the whole point.
+(batch yielded to live) → `done` / `error` / `canceled`. Each state has a wire event
+(ADR-0018), including `paused`/`resumed` — a job can sit `paused` for the length of a
+live session, so that state is observable, not silent. Terminal naming matches the
+wire: `done` / `error` / `canceled`. Live always outranks batch; batch ordering is
+**FIFO within an owner, round-robin across owners** (above). Empty queue **and** no
+live session → idle TTL → unload (ADR-0011), freeing the GPU for games/other work.
 
 ### Scope
 
