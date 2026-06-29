@@ -1,8 +1,17 @@
 # ADR-0008: Build order — CLI daemon first
 
-- **Status**: Accepted
+- **Status**: Accepted (build order partially superseded by [ADR-0017](0017-rust-clients-python-service.md))
 - **Date**: 2026-06-28
 - **Deciders**: Aaron
+
+> **Note (2026-06-29):** [ADR-0017](0017-rust-clients-python-service.md) resequences
+> this build order. The client/server boundary is introduced *before* the remaining
+> client features: (a) extract the backend HTTP service around the existing cores,
+> (b) build the **CLI client in Rust** to parity over that wire, then (c) resume the
+> stages below. Stage 2's "CLI client" is now a Rust client over the client-facing
+> wire (not the engine's OpenAI API). Stages 1 and 3 are already built (in Python),
+> stage 2's render belongs client-side. The dependency ordering below still holds;
+> only the language and the inserted service-extraction step change.
 
 ## Context
 
