@@ -16,5 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - name: Lint (ruff)
+        run: uv run --project backend --group dev ruff check backend/transcribbler backend/tests
       - name: Unit tests (alignment, IR)
         run: uv run --project backend --group dev pytest backend/tests -q
