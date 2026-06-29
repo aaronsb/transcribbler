@@ -15,7 +15,12 @@ backend = "rocm"                                               # torch on AMD = 
 model = "pyannote/speaker-diarization-community-1"             # HF-gated; needs accepted terms + HF_TOKEN
 
 [llm]
-engine = "llama.cpp"
+# Canonicalization (LLM speaker-naming) is OPT-IN and OFF by default: low yield
+# for the compute, and naming-by-voiceprint (ADR-0016) is the better path. The
+# capability remains available — to enable, set engine = "llama.cpp" and uncomment:
+engine = "none"
 backend = "vulkan"
-binary = "/usr/bin/llama-server"
-# model = "..."                                                # canonicalization model, wired in a later stage
+# binary = "/usr/bin/llama-server"
+# model = "/home/aaron/Projects/ai/llama.cpp/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+# endpoint = "http://127.0.0.1:8099"   # reuse a running server if healthy; else spawn
+# port = 8099

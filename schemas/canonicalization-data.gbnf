@@ -1,0 +1,18 @@
+# GBNF for canonicalization-data (ADR-0004/0006). Hand-written because the JSON
+# Schema's `pattern` (^S[0-9]+$) breaks llama.cpp's built-in --json-schema converter.
+# Mirrors canonicalization-data.schema.json with a fixed field order; the strict
+# schema still validates the parsed result afterward.
+root    ::= "{" ws "\"speaker_map\"" ws ":" ws "[" ws smaps? ws "]" ws "," ws "\"term_map\"" ws ":" ws "[" ws tmaps? ws "]" ws "}"
+
+smaps   ::= smap (ws "," ws smap)*
+smap    ::= "{" ws "\"id\"" ws ":" ws id ws "," ws "\"display_name\"" ws ":" ws string ws "," ws "\"role\"" ws ":" ws string ws "," ws "\"confidence\"" ws ":" ws conf ws "," ws "\"evidence\"" ws ":" ws string ws "}"
+
+tmaps   ::= tmap (ws "," ws tmap)*
+tmap    ::= "{" ws "\"canonical\"" ws ":" ws string ws "," ws "\"variants\"" ws ":" ws "[" ws strings? ws "]" ws "}"
+strings ::= string (ws "," ws string)*
+
+id      ::= "\"S" [0-9]+ "\""
+conf    ::= ("0" ("." [0-9]+)?) | ("1" ("." "0"+)?)
+string  ::= "\"" char* "\""
+char    ::= [^"\\] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F])
+ws      ::= [ \t\n]*

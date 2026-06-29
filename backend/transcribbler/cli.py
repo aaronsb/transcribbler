@@ -12,8 +12,9 @@ import sys
 from pathlib import Path
 
 from . import __version__, env, probe, profiles
-from .cores import asr_core, diarizer_core
-from .ir import build_ir
+from .canon import apply_canonicalization, build_evidence
+from .cores import asr_core, canonicalizer_core, diarizer_core
+from .ir import build_ir, validate_ir
 
 
 def _cmd_probe(args: argparse.Namespace) -> int:
@@ -49,6 +50,15 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
 
     ir = build_ir(segments, profile, audio, diar_turns=diar_turns)
 
+    if profile.llm.enabled and not args.no_canon:
+        canon = canonicalizer_core(profile.llm)
+        print(f"  canonicalizing: {canon.name} ({profile.llm.backend})", file=sys.stderr)
+        data = canon.canonicalize(build_evidence(ir))
+        ir = apply_canonicalization(ir, data)
+        validate_ir(ir)
+        named = [s for s in ir["speakers"] if s.get("display_name")]
+        print(f"  named {len(named)}/{len(ir['speakers'])} speakers", file=sys.stderr)
+
     out = json.dumps(ir, indent=2, ensure_ascii=False)
     if args.output:
         Path(args.output).write_text(out + "\n")
@@ -70,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("-p", "--profile", required=True, help="path to a compute profile .toml")
     t.add_argument("-o", "--output", help="write IR JSON here (default: stdout)")
     t.add_argument("--no-diarize", action="store_true", help="skip diarization even if the profile enables it")
+    t.add_argument("--no-canon", action="store_true", help="skip LLM speaker naming even if the profile enables it")
     t.set_defaults(func=_cmd_transcribe)
 
     env.load_env_file()  # make HF_TOKEN etc. available to cores
