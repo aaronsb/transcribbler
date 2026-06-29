@@ -1,0 +1,4 @@
+# Tooling dependencies for schema validation (schemas/validate.py).
+# Application/runtime dependencies will live with their own components later.
+jsonschema>=4.18
+rfc3339-validator>=0.1.4   # enables date-time format checking in jsonschema

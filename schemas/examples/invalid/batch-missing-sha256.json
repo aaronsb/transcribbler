@@ -1,0 +1,7 @@
+{
+  "schema_version": "0.1",
+  "source": { "kind": "batch", "uri": "file:///tmp/a.wav", "duration_s": 5 },
+  "backend": { "kind": "modular" },
+  "speakers": [],
+  "turns": []
+}

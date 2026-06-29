@@ -1,0 +1,20 @@
+{
+  "schema_version": "0.1",
+  "source": {
+    "kind": "session",
+    "duration_s": 22.5
+  },
+  "backend": {
+    "kind": "modular",
+    "asr": "whisper.cpp/large-v3",
+    "diarizer": "pyannote/community-1"
+  },
+  "speakers": [
+    { "id": "S1", "source": "fallback" },
+    { "id": "S2", "source": "fallback" }
+  ],
+  "turns": [
+    { "speaker_id": "S1", "start": 0.0, "end": 5.0, "text": "Did you get the file I sent over?" },
+    { "speaker_id": "S2", "start": 5.2, "end": 9.4, "text": "Yeah, looking at it now." }
+  ]
+}

@@ -7,10 +7,36 @@ The wire contracts for transcribbler. These finalize the sketch in
 |---|---|
 | `canonical-ir.schema.json` | **Canonical IR** — the backend-agnostic transcript contract. One document = one recording (batch) or one session epoch ([ADR-0009](../docs/architecture/0009-capture-cadence.md)). Both the modular and joint backends ([ADR-0005](../docs/architecture/0005-diarization-flow.md)) emit it; all renderers consume it. |
 | `canonicalization-data.schema.json` | The **only** thing the canonicalization LLM emits ([ADR-0006](../docs/architecture/0006-canonical-ir-contract.md)): a `speaker_map` + `term_map`. Never the transcript body. A pure `apply()` rewrites the IR from (global clusters + this mapping). |
-| `examples/session-modular.ir.json` | Golden IR fixture (modular backend, a live session). |
-| `examples/canonicalization-data.example.json` | Golden LLM-output fixture (produced the speaker/glossary fields in the IR above). |
+| `examples/session-modular.ir.json` | Golden IR fixture — modular backend, live session, exercises words/overlap/provenance/glossary. |
+| `examples/batch-joint.ir.json` | Golden IR fixture — joint backend (no `diarizer`), batch source with `uri`+`sha256`, a fallback speaker. |
+| `examples/fallback-speakers.ir.json` | Golden IR fixture — degraded path: all speakers `source: "fallback"`, no names, no glossary. |
+| `examples/canonicalization-data.example.json` | Golden LLM-output fixture (produced the speaker/glossary fields in `session-modular.ir.json`). |
+| `examples/invalid/*.json` | Negative fixtures — each MUST be rejected by its schema. Locks in that the constraints have teeth. |
 
 Both schemas are JSON Schema **draft 2020-12**.
+
+## Invariants enforced by `apply()`, not the schema
+
+JSON Schema deliberately does **not** express cross-field/relational rules. These are the
+contract's responsibility of the deterministic `apply()` builder ([ADR-0006](../docs/architecture/0006-canonical-ir-contract.md)),
+not the schema — listed here so the gap is tracked, not silent:
+
+- **Referential integrity**: every `turn.speaker_id` and every `secondary_speakers[]` entry
+  must match a `speakers[].id`.
+- **Speaker id uniqueness**: `speakers[].id` values are unique within a document.
+- **Time ordering**: `turn.end >= turn.start`; turns are chronological.
+- **Word coverage** (when `words` present): word times fall within `[turn.start, turn.end]`.
+
+These will be covered by `apply()`'s own unit tests once it exists.
+
+## Versioning policy
+
+`schema_version` is a hard `const`. The contract is **strict** (`additionalProperties:false`
+throughout), so *any* schema change — even additive — is a version bump, and old validators
+correctly reject documents from a newer schema. Bump `schema_version` (e.g. `0.1` → `0.2`)
+on any change to `canonical-ir.schema.json`. The canonicalization-data schema intentionally
+has **no** version field (the LLM emits only the mapping; versioning lives with the prompt
++ schema pairing, not in the model output).
 
 ## GBNF / constrained decoding
 
@@ -23,7 +49,7 @@ derives the grammar from the JSON Schema at runtime, guaranteeing valid output
 llama-cli --json-schema "$(cat schemas/canonicalization-data.schema.json)" ...
 
 # Option B: pre-convert to GBNF if you want to inspect/cache it
-python llama.cpp/examples/json_schema_to_grammar.py \
+python3 llama.cpp/examples/json_schema_to_grammar.py \
     schemas/canonicalization-data.schema.json > canonicalization-data.gbnf
 ```
 
@@ -33,11 +59,15 @@ as the renderer/consumer contract.
 
 ## Validation
 
-`make validate-schemas` (or run directly):
-
 ```bash
-python schemas/validate.py
+make validate-schemas   # self-contained: creates .venv, installs requirements.txt, runs the validator
 ```
 
-This checks both schemas are valid draft 2020-12 and that every fixture in `examples/`
-validates against its schema. Run it in CI and before changing a schema.
+It checks that: both schemas are valid draft 2020-12; every `examples/*.json` fixture
+validates (with **date-time format checking**, via `rfc3339-validator`); every
+`examples/invalid/*.json` fixture is **rejected**; and no fixture file on disk is left
+undeclared (orphan detection). It runs in CI on every push/PR that touches `schemas/`
+(`.github/workflows/validate-schemas.yml`).
+
+To run the validator directly (deps must already be importable):
+`python3 schemas/validate.py`.
