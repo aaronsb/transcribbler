@@ -23,6 +23,11 @@ Format: lightweight [MADR](https://adr.github.io/madr/)-style. One decision per 
 | [0014](0014-ir-epoch-session-identity.md) | IR epoch/session identity & deterministic merge | Deferred |
 | [0015](0015-pluggable-compute-backends.md) | Pluggable compute backends — swapping GPUs via wire seam + compute profiles | Accepted |
 | [0016](0016-speaker-naming-strategy.md) | Speaker naming strategy — voiceprint enrollment primary; LLM optional | Accepted |
+| [0017](0017-rust-clients-python-service.md) | Rust single-binary clients over a Python backend service | Accepted |
+| [0018](0018-client-facing-wire.md) | Client-facing wire — one HTTP contract over Unix-socket (local) + TCP (remote) | Accepted |
+| [0019](0019-job-scheduling.md) | Job scheduling — admission, concurrency, live priority + modes | Accepted |
+| [0020](0020-remote-access-security.md) | Remote access & security — per-locality tiers (UDS / SSH / direct) + principal model | Accepted |
+| [0021](0021-internet-cloud-worker.md) | Internet access via an authenticated cloud worker (deferred) | Proposed |
 
 ## Conventions
 

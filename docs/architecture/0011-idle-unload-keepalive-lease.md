@@ -4,6 +4,12 @@
 - **Date**: 2026-06-28
 - **Deciders**: Aaron
 
+> **Note (2026-06-29):** [ADR-0019](0019-job-scheduling.md) allows multiple
+> simultaneous live sessions, so the lease is **multi-holder / reference-counted** —
+> each live session takes a hold; the models unload only when the count reaches zero
+> (no live session remains). `DELETE` of one session releases *its* hold, not the
+> whole lease. To be finalized here with the daemon.
+
 ## Context
 
 Goal 4 / [ADR-0004](0004-llama-cpp-native-backend.md) free the GPU by unloading models

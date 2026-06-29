@@ -4,6 +4,13 @@
 - **Date**: 2026-06-28
 - **Deciders**: Aaron
 
+> **Note (2026-06-29):** Disambiguation — there are **two** spools, and they are
+> different things. *This* ADR is the **client-side** store-and-forward buffer on the
+> capture host (holds finalized epochs, drains to the backend when it's reachable).
+> [ADR-0019](0019-job-scheduling.md) refers to a **server-side** job queue + live
+> audio buffer on the backend; that is a separate structure, not the one defined here.
+> Both to be finalized with the capture daemon.
+
 ## Context
 
 The capture daemon runs 24/7 on the desktop, but its backend lives on cube

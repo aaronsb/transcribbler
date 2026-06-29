@@ -1,8 +1,15 @@
 # ADR-0001: Composable daemon + thin clients (reject the monolith)
 
-- **Status**: Accepted
+- **Status**: Accepted (client wire refined by [ADR-0017](0017-rust-clients-python-service.md)/[ADR-0018](0018-client-facing-wire.md))
 - **Date**: 2026-06-28
 - **Deciders**: Aaron
+
+> **Note (2026-06-29):** This ADR describes the client↔backend protocol as
+> "OpenAI-compatible HTTP." [ADR-0017](0017-rust-clients-python-service.md) refines
+> that: the *clients* speak a distinct **client-facing contract**
+> ([ADR-0018](0018-client-facing-wire.md)); OpenAI-compatible HTTP is the backend's
+> *internal engine* wire ([ADR-0004](0004-llama-cpp-native-backend.md)). The split +
+> thin-client decision here stands; only the wire layering is clarified.
 
 ## Context
 
