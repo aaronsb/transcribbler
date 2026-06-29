@@ -13,7 +13,8 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
-from .cores.base import Segment
+from .align import align
+from .cores.base import Segment, SpeakerTurn
 from .profiles import Profile
 
 SCHEMA_VERSION = "0.1"
@@ -41,24 +42,35 @@ def build_ir(
     profile: Profile,
     source_path: Path,
     *,
+    diar_turns: list[SpeakerTurn] | None = None,
     validate: bool = True,
 ) -> dict:
-    """Assemble an ASR-only Canonical IR document from segments."""
+    """Assemble a Canonical IR document from ASR segments.
+
+    With `diar_turns`, segments are speaker-attributed via overlap alignment
+    (ADR-0005). Without them, this is the ASR-only fallback: one fallback speaker.
+    """
     duration = max((s.end for s in segments), default=0.0)
-    ir = {
-        "schema_version": SCHEMA_VERSION,
-        "source": {
-            "kind": "batch",
-            "uri": source_path.resolve().as_uri(),
-            "sha256": sha256_of(source_path),
-            "duration_s": round(duration, 3) if duration > 0 else 0.001,
-        },
-        "backend": {
-            "kind": "modular",
-            "asr": f"{profile.asr.engine}:{profile.asr.backend}",
-        },
-        "speakers": [{"id": "S1", "source": "fallback"}],
-        "turns": [
+    backend = {"kind": "modular", "asr": f"{profile.asr.engine}:{profile.asr.backend}"}
+
+    if diar_turns:
+        backend["diarizer"] = f"{profile.diar.engine}:{profile.diar.backend}"
+        speaker_ids, aligned = align(segments, diar_turns)
+        speakers = [{"id": sid, "source": "fallback"} for sid in speaker_ids]
+        turns = [
+            {
+                "speaker_id": a.speaker_id,
+                "start": round(a.start, 3),
+                "end": round(a.end, 3),
+                "text": a.text,
+                **({"secondary_speakers": a.secondary_speakers} if a.secondary_speakers else {}),
+                "provenance": {"chunk": 0, "offset_s": 0.0},
+            }
+            for a in aligned
+        ]
+    else:
+        speakers = [{"id": "S1", "source": "fallback"}]
+        turns = [
             {
                 "speaker_id": "S1",
                 "start": round(s.start, 3),
@@ -67,7 +79,19 @@ def build_ir(
                 "provenance": {"chunk": 0, "offset_s": 0.0},
             }
             for s in segments
-        ],
+        ]
+
+    ir = {
+        "schema_version": SCHEMA_VERSION,
+        "source": {
+            "kind": "batch",
+            "uri": source_path.resolve().as_uri(),
+            "sha256": sha256_of(source_path),
+            "duration_s": round(duration, 3) if duration > 0 else 0.001,
+        },
+        "backend": backend,
+        "speakers": speakers,
+        "turns": turns,
     }
     if validate:
         errors = sorted(_validator().iter_errors(ir), key=lambda e: list(map(str, e.path)))

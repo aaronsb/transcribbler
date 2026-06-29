@@ -17,9 +17,29 @@ class Segment:
     text: str
 
 
+@dataclass(frozen=True)
+class SpeakerTurn:
+    """A diarizer's verdict: speaker `label` is active over [start, end].
+
+    `label` is the engine's *local* speaker id (e.g. "0", "SPEAKER_01"); it is
+    mapped to a canonical, recording-wide id (S1, S2, ...) during alignment.
+    """
+    start: float
+    end: float
+    label: str
+
+
 class ASRCore(Protocol):
     name: str
 
     def transcribe(self, audio_path: Path) -> list[Segment]:
         """Transcribe a normalized audio file into chronological segments."""
+        ...
+
+
+class DiarizerCore(Protocol):
+    name: str
+
+    def diarize(self, audio_path: Path) -> list[SpeakerTurn]:
+        """Diarize a normalized audio file into speaker turns over the whole file."""
         ...

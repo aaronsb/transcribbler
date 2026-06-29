@@ -24,3 +24,8 @@ backend-smoke:
 	@test -f "$(SAMPLE)" || { echo "skip: $(SAMPLE) not found (build whisper.cpp first)"; exit 0; }
 	uv run --project backend transcribbler transcribe "$(SAMPLE)" -p profiles/desktop-vulkan.toml -o /tmp/transcribbler-smoke.ir.json
 	@echo "smoke IR written to /tmp/transcribbler-smoke.ir.json"
+
+# Backend unit tests (alignment, IR construction).
+.PHONY: backend-test
+backend-test:
+	uv run --project backend --group dev pytest backend/tests -q
