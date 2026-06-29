@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from ..profiles import StageConfig
 from .base import ASRCore, DiarizerCore, Segment, SpeakerTurn
+from .llama_canon import LlamaCanonicalizer
 from .pyannote import PyannoteCore
 from .whisper_cpp import WhisperCppCore
 
@@ -25,6 +26,13 @@ def diarizer_core(cfg: StageConfig) -> DiarizerCore:
     raise ValueError(f"unknown diarizer engine: {cfg.engine!r}")
 
 
+def canonicalizer_core(cfg: StageConfig) -> LlamaCanonicalizer:
+    """Resolve a canonicalizer core from its stage config."""
+    if cfg.engine in ("llama.cpp", "llama-server"):
+        return LlamaCanonicalizer(cfg)
+    raise ValueError(f"unknown canonicalizer engine: {cfg.engine!r}")
+
+
 __all__ = [
     "ASRCore",
     "DiarizerCore",
@@ -32,6 +40,8 @@ __all__ = [
     "SpeakerTurn",
     "WhisperCppCore",
     "PyannoteCore",
+    "LlamaCanonicalizer",
     "asr_core",
     "diarizer_core",
+    "canonicalizer_core",
 ]

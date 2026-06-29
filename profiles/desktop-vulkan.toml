@@ -15,7 +15,9 @@ backend = "rocm"                                               # torch on AMD = 
 model = "pyannote/speaker-diarization-community-1"             # HF-gated; needs accepted terms + HF_TOKEN
 
 [llm]
-engine = "llama.cpp"
+engine = "llama.cpp"                                           # canonicalization: speaker naming (GBNF, non-thinking, temp 0)
 backend = "vulkan"
 binary = "/usr/bin/llama-server"
-# model = "..."                                                # canonicalization model, wired in a later stage
+model = "/home/aaron/Projects/ai/llama.cpp/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+endpoint = "http://127.0.0.1:8099"                             # reuse a running server if healthy; else spawn for the call
+port = 8099

@@ -29,6 +29,14 @@ def _validator() -> Draft202012Validator:
     return Draft202012Validator(schema, format_checker=Draft202012Validator.FORMAT_CHECKER)
 
 
+def validate_ir(ir: dict) -> None:
+    """Raise ValueError if the IR does not satisfy the Canonical IR schema."""
+    errors = sorted(_validator().iter_errors(ir), key=lambda e: list(map(str, e.path)))
+    if errors:
+        locs = "; ".join(f"{'/'.join(map(str, e.path)) or '<root>'}: {e.message}" for e in errors[:5])
+        raise ValueError(f"IR fails schema: {locs}")
+
+
 def sha256_of(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
