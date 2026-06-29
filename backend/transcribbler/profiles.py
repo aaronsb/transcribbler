@@ -4,6 +4,7 @@ A profile is declarative data describing one runnable backend on one host: per
 stage (asr / diar / llm) the engine, device backend, binary, and model. Selecting
 a profile selects the GPU path; adding a GPU is adding a profile, not editing code.
 """
+
 from __future__ import annotations
 
 import tomllib

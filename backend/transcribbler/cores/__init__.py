@@ -3,6 +3,7 @@
 Each core implements a narrow interface so engines and devices are config, not
 code. New engine = new adapter; nothing else moves.
 """
+
 from __future__ import annotations
 
 from ..profiles import StageConfig

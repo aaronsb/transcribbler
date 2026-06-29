@@ -5,6 +5,7 @@ is chosen at *build* time of whisper.cpp; this adapter just runs whichever binar
 the profile points at. Input audio is normalized to 16 kHz mono WAV first
 (ADR-0005), which is what whisper.cpp expects.
 """
+
 from __future__ import annotations
 
 import json
@@ -38,10 +39,13 @@ class WhisperCppCore:
     def _run(self, wav: Path, out_prefix: Path) -> None:
         cmd = [
             self.binary,
-            "-m", self.model,
-            "-f", str(wav),
-            "-oj",                      # JSON output
-            "-of", str(out_prefix),     # output file prefix
+            "-m",
+            self.model,
+            "-f",
+            str(wav),
+            "-oj",  # JSON output
+            "-of",
+            str(out_prefix),  # output file prefix
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:

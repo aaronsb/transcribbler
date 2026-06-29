@@ -11,6 +11,7 @@ If the profile points at an already-running server (options.endpoint) it is reus
 otherwise a server is spawned for the call and shut down after (frees VRAM, ADR-0011).
 The returned object is schema-validated before it leaves this core.
 """
+
 from __future__ import annotations
 
 import json
@@ -58,9 +59,24 @@ class LlamaCanonicalizer:
             raise FileNotFoundError(f"canonicalization model not found: {self.model}")
         base = f"http://127.0.0.1:{self.port}"
         proc = subprocess.Popen(
-            [self.binary, "-m", self.model, "-ngl", "99", "--host", "127.0.0.1",
-             "--port", str(self.port), "--jinja", "-c", "8192", "--temp", "0"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            [
+                self.binary,
+                "-m",
+                self.model,
+                "-ngl",
+                "99",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(self.port),
+                "--jinja",
+                "-c",
+                "8192",
+                "--temp",
+                "0",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         try:
             _wait_healthy(base, _SPAWN_TIMEOUT_S)

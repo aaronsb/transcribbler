@@ -4,6 +4,7 @@ The IR is the source of truth; renderers are pure views over it. A speaker's lab
 is its display_name if named, else its id (S1, S2) — names live only in the
 speakers[] table, so renderers resolve them by id at output time.
 """
+
 from __future__ import annotations
 
 
@@ -27,7 +28,14 @@ def _group_consecutive(turns: list[dict]) -> list[dict]:
             blocks[-1]["end"] = t["end"]
             blocks[-1]["text"] += " " + t["text"].strip()
         else:
-            blocks.append({"speaker_id": t["speaker_id"], "start": t["start"], "end": t["end"], "text": t["text"].strip()})
+            blocks.append(
+                {
+                    "speaker_id": t["speaker_id"],
+                    "start": t["start"],
+                    "end": t["end"],
+                    "text": t["text"].strip(),
+                }
+            )
     return blocks
 
 
@@ -40,10 +48,16 @@ def to_markdown(ir: dict) -> str:
         head.append(f"- **Source:** {src['uri']}")
     head.append(f"- **Duration:** {dur_min:.1f} min")
     be = ir.get("backend", {})
-    head.append(f"- **Backend:** {be.get('asr', '?')}" + (f" + {be['diarizer']}" if be.get("diarizer") else ""))
-    head.append("- **Speakers:** " + ", ".join(
-        f"{labels[s['id']]}" + (f" ({s['role']})" if s.get("role") else "") for s in ir["speakers"]
-    ) or "—")
+    head.append(
+        f"- **Backend:** {be.get('asr', '?')}" + (f" + {be['diarizer']}" if be.get("diarizer") else "")
+    )
+    head.append(
+        "- **Speakers:** "
+        + ", ".join(
+            f"{labels[s['id']]}" + (f" ({s['role']})" if s.get("role") else "") for s in ir["speakers"]
+        )
+        or "—"
+    )
     head.append("")
 
     body = []

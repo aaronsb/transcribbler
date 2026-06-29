@@ -9,6 +9,7 @@ deterministic first-appearance numbering — no cross-chunk reconciliation neede
 This is pure, deterministic code (no ML): same inputs -> same output, so it is
 golden-file testable.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -60,12 +61,12 @@ def _primary_and_secondary(
         return labels[nearest.label], []
 
     # Primary = most overlap; ties broken deterministically by lowest local label.
-    primary = max(sorted(by_label), key=lambda l: by_label[l])
+    primary = max(sorted(by_label), key=lambda lbl: by_label[lbl])
     seg_len = max(seg.end - seg.start, 1e-9)
     secondary = sorted(
-        labels[l]
-        for l, ov in by_label.items()
-        if l != primary and ov / seg_len >= SECONDARY_MIN_OVERLAP
+        labels[lbl]
+        for lbl, ov in by_label.items()
+        if lbl != primary and ov / seg_len >= SECONDARY_MIN_OVERLAP
     )
     return labels[primary], secondary
 

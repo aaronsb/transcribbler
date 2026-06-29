@@ -4,6 +4,7 @@ First slice: `probe` (what GPUs are here) and `transcribe` (run the profile's AS
 core on a file → validated Canonical IR). HTTP serving, diarization, and the
 canonicalization LLM come in later stages (ADR-0008).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -23,7 +24,7 @@ def _cmd_probe(args: argparse.Namespace) -> int:
     print(f"cuda   : {caps.cuda or '-'}")
     print(f"rocm   : {caps.rocm or '-'}")
     print(f"vulkan : {caps.vulkan or '-'}")
-    print(f"cpu    : yes")
+    print("cpu    : yes")
     print(f"recommended backend: {caps.recommend()}")
     return 0
 
@@ -92,14 +93,22 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("audio", help="audio/video file")
     t.add_argument("-p", "--profile", required=True, help="path to a compute profile .toml")
     t.add_argument("-o", "--output", help="write here (default: stdout)")
-    t.add_argument("-f", "--format", choices=["json", "md", "vtt"], default="json", help="output format (default: json)")
-    t.add_argument("--no-diarize", action="store_true", help="skip diarization even if the profile enables it")
-    t.add_argument("--no-canon", action="store_true", help="skip LLM speaker naming even if the profile enables it")
+    t.add_argument(
+        "-f", "--format", choices=["json", "md", "vtt"], default="json", help="output format (default: json)"
+    )
+    t.add_argument(
+        "--no-diarize", action="store_true", help="skip diarization even if the profile enables it"
+    )
+    t.add_argument(
+        "--no-canon", action="store_true", help="skip LLM speaker naming even if the profile enables it"
+    )
     t.set_defaults(func=_cmd_transcribe)
 
     r = sub.add_parser("render", help="render an existing Canonical IR to md/vtt/json")
     r.add_argument("ir", help="path to a Canonical IR .json")
-    r.add_argument("-f", "--format", choices=["json", "md", "vtt"], default="md", help="output format (default: md)")
+    r.add_argument(
+        "-f", "--format", choices=["json", "md", "vtt"], default="md", help="output format (default: md)"
+    )
     r.add_argument("-o", "--output", help="write here (default: stdout)")
     r.set_defaults(func=_cmd_render)
 

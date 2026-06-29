@@ -1,4 +1,5 @@
 """Tests for overlap alignment (ADR-0005). Pure, deterministic — golden behavior."""
+
 from __future__ import annotations
 
 from transcribbler.align import SECONDARY_MIN_OVERLAP, align, canonical_speaker_map
@@ -42,7 +43,7 @@ def test_segment_spanning_boundary_picks_majority_and_flags_secondary():
     segs = [_seg(8, 14)]
     _, aligned = align(segs, turns)
     a = aligned[0]
-    assert a.speaker_id == "S2"          # speaker "1" has the majority overlap
+    assert a.speaker_id == "S2"  # speaker "1" has the majority overlap
     assert a.secondary_speakers == ["S1"]  # speaker "0" covers 2/6 = 33% >= threshold
 
 

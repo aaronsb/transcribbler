@@ -3,6 +3,7 @@
 Detect which GPU backends are present so a host can self-select / recommend a
 profile. Pure detection — no model loading.
 """
+
 from __future__ import annotations
 
 import shutil
@@ -42,17 +43,26 @@ def _first_line(cmd: list[str]) -> str | None:
 
 
 def detect() -> Capabilities:
-    cuda = _first_line(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]) \
-        if shutil.which("nvidia-smi") else None
+    cuda = (
+        _first_line(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"])
+        if shutil.which("nvidia-smi")
+        else None
+    )
     rocm = None
     if shutil.which("rocminfo"):
         # Pick the GPU agent's marketing name, not the CPU agent's (listed first).
         out = _first_line(
-            ["bash", "-c", "rocminfo | grep 'Marketing Name' | grep -iE 'radeon|instinct|gpu' | head -1 | cut -d: -f2"]
+            [
+                "bash",
+                "-c",
+                "rocminfo | grep 'Marketing Name' | grep -iE 'radeon|instinct|gpu' | head -1 | cut -d: -f2",
+            ]
         )
         rocm = out or "detected"
     vulkan = None
     if shutil.which("vulkaninfo"):
-        out = _first_line(["bash", "-c", "vulkaninfo --summary 2>/dev/null | grep -m1 deviceName | cut -d= -f2"])
+        out = _first_line(
+            ["bash", "-c", "vulkaninfo --summary 2>/dev/null | grep -m1 deviceName | cut -d= -f2"]
+        )
         vulkan = (out or "detected").strip()
     return Capabilities(cuda=cuda, rocm=rocm, vulkan=vulkan)
