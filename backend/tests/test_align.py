@@ -64,6 +64,16 @@ def test_segment_in_gap_attributes_to_nearest_turn():
     assert aligned[0].speaker_id == "S1"
 
 
+def test_orphan_speakers_are_not_declared():
+    # Speaker "1" only speaks at 100-110s, but there are no segments there, so no
+    # turn is ever attributed to it -> it must not appear in the speaker list.
+    turns = [_turn(0, 10, "0"), _turn(100, 110, "1")]
+    segs = [_seg(1, 4), _seg(5, 9)]
+    ids, aligned = align(segs, turns)
+    assert ids == ["S1"]
+    assert all(a.speaker_id == "S1" for a in aligned)
+
+
 def test_text_and_timing_are_preserved():
     turns = [_turn(0, 10, "0")]
     segs = [_seg(1.234, 4.567, "hello world")]
