@@ -22,8 +22,8 @@ SAMPLE := $(HOME)/Projects/ai/whisper.cpp/samples/jfk.wav
 .PHONY: backend-smoke
 backend-smoke:
 	@test -f "$(SAMPLE)" || { echo "skip: $(SAMPLE) not found (build whisper.cpp first)"; exit 0; }
-	uv run --project backend transcribbler transcribe "$(SAMPLE)" -p profiles/desktop-vulkan.toml -o /tmp/transcribbler-smoke.ir.json
-	@echo "smoke IR written to /tmp/transcribbler-smoke.ir.json"
+	uv run --project backend transcribbler transcribe "$(SAMPLE)" -p profiles/desktop-vulkan.toml --no-diarize -o /tmp/transcribbler-smoke.ir.json
+	@echo "smoke IR written to /tmp/transcribbler-smoke.ir.json (ASR-only; diarization needs the gated model)"
 
 # Backend unit tests (alignment, IR construction).
 .PHONY: backend-test

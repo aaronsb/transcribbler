@@ -11,8 +11,8 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__, probe, profiles
-from .cores import asr_core
+from . import __version__, env, probe, profiles
+from .cores import asr_core, diarizer_core
 from .ir import build_ir
 
 
@@ -39,7 +39,15 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
     core = asr_core(profile.asr)
     print(f"[{profile.name}] {core.name} ({profile.asr.backend}) → {audio.name}", file=sys.stderr)
     segments = core.transcribe(audio)
-    ir = build_ir(segments, profile, audio)
+
+    diar_turns = None
+    if profile.diar.enabled and not args.no_diarize:
+        diarizer = diarizer_core(profile.diar)
+        print(f"  diarizing: {diarizer.name} ({profile.diar.backend})", file=sys.stderr)
+        diar_turns = diarizer.diarize(audio)
+        print(f"  {len(diar_turns)} speaker turns", file=sys.stderr)
+
+    ir = build_ir(segments, profile, audio, diar_turns=diar_turns)
 
     out = json.dumps(ir, indent=2, ensure_ascii=False)
     if args.output:
@@ -61,8 +69,10 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("audio", help="audio/video file")
     t.add_argument("-p", "--profile", required=True, help="path to a compute profile .toml")
     t.add_argument("-o", "--output", help="write IR JSON here (default: stdout)")
+    t.add_argument("--no-diarize", action="store_true", help="skip diarization even if the profile enables it")
     t.set_defaults(func=_cmd_transcribe)
 
+    env.load_env_file()  # make HF_TOKEN etc. available to cores
     args = parser.parse_args(argv)
     return args.func(args)
 

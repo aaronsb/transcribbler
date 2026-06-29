@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from ..audio import normalize_wav
 from ..profiles import StageConfig
 from .base import Segment
 
@@ -29,7 +30,7 @@ class WhisperCppCore:
 
     def transcribe(self, audio_path: Path) -> list[Segment]:
         with tempfile.TemporaryDirectory(prefix="transcribbler_") as tmp:
-            wav = _normalize(audio_path, Path(tmp) / "norm.wav")
+            wav = normalize_wav(audio_path, Path(tmp) / "norm.wav")
             out_prefix = Path(tmp) / "out"
             self._run(wav, out_prefix)
             return _parse(out_prefix.with_suffix(".json"))
@@ -45,15 +46,6 @@ class WhisperCppCore:
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             raise RuntimeError(f"whisper-cli failed ({proc.returncode}): {proc.stderr[-500:]}")
-
-
-def _normalize(src: Path, dst: Path) -> Path:
-    """ffmpeg → 16 kHz mono WAV (ADR-0005 normalization)."""
-    cmd = ["ffmpeg", "-y", "-i", str(src), "-vn", "-ar", "16000", "-ac", "1", str(dst)]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg normalize failed: {proc.stderr[-500:]}")
-    return dst
 
 
 def _parse(json_path: Path) -> list[Segment]:

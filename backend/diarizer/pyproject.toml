@@ -1,0 +1,30 @@
+# Diarizer sidecar (ADR-0004): isolated torch-ROCm env so torch never enters the
+# main backend (which runs on the host Python). Invoked as a subprocess by
+# PyannoteCore. Pinned to ROCm 7.0 wheels (host runs ROCm 7.2; torch wheels bundle
+# their own ROCm runtime, so the closest published wheel is fine on gfx1100).
+[project]
+name = "transcribbler-diarizer"
+version = "0.1.0"
+description = "pyannote diarization sidecar (torch-ROCm)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "torch==2.10.0",
+    "torchaudio==2.10.0",
+    "pyannote.audio>=4.0",
+    "huggingface-hub>=0.27",
+    "soundfile>=0.12",
+]
+
+# torch + transitive ROCm deps (triton-rocm) come from the PyTorch index; newer
+# generic deps (tqdm, ...) come from PyPI. Both indexes are trusted, so consider
+# best match across both rather than "first index wins".
+[tool.uv]
+index-strategy = "unsafe-best-match"
+
+[tool.uv.sources]
+torch = { index = "pytorch-rocm" }
+torchaudio = { index = "pytorch-rocm" }
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.0"
