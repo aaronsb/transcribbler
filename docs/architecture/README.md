@@ -25,6 +25,7 @@ Format: lightweight [MADR](https://adr.github.io/madr/)-style. One decision per 
 | [0016](0016-speaker-naming-strategy.md) | Speaker naming strategy — voiceprint enrollment primary; LLM optional | Accepted |
 | [0017](0017-rust-clients-python-service.md) | Rust single-binary clients over a Python backend service | Proposed |
 | [0018](0018-client-facing-wire.md) | Client-facing wire — one HTTP contract over Unix-socket (local) + TCP (remote) | Proposed |
+| [0019](0019-job-scheduling.md) | Job scheduling — admission, concurrency, live priority (drain-and-suspend) | Proposed |
 
 ## Conventions
 

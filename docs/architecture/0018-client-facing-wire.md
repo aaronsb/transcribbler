@@ -136,7 +136,8 @@ source of truth and lives on the backend.
 ## Related
 
 - ADR-0017 (the split this contract serves; resolves its wire/persistence/autostart
-  open questions), ADR-0004 (the internal engine wire this sits in front of),
+  open questions), [ADR-0019](0019-job-scheduling.md) (how submitted jobs are
+  admitted/queued/prioritized), ADR-0004 (the internal engine wire this sits in front of),
   ADR-0006 (the IR carried), ADR-0007 (supervision / TLS termination),
   ADR-0011 (lease released on cancel), ADR-0012 (server-owned spool/jobs),
   ADR-0013/0014 (retention, persistence, deletion), ADR-0002 (independent host deploys).
