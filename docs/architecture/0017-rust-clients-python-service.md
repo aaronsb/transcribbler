@@ -137,19 +137,15 @@ the Rust CLI reaches parity.
 These are consequences of drawing the boundary; each is tracked for follow-up so
 this ADR stays focused on the *language + boundary* decision.
 
-- **Client-facing wire contract → its own ADR.** Endpoints, streaming + terminal
-  (success/error) events, and **cancellation** semantics (cancellation must release
-  the ADR-0011 idle-unload keep-alive lease), plus a **wire-version handshake** so
-  client and backend can deploy independently across hosts (ADR-0002).
-- **Remote auth/authz → a security ADR.** TLS via traefik (ADR-0007) is *transport*,
-  not *identity*; a backend on cube reachable by desktop clients needs an auth model.
-  Intersects consent/retention (ADR-0013).
-- **Transcript persistence ownership.** Render moves client-side, but the store has
-  been assumed pipeline-side (ADR-0005/0006, 0013/0014). Decide who persists the IR
-  and rendered artifacts before the capture daemon (which has no human at render time).
-- **Local-vs-remote backend selection + autostart.** The CLI must pick a backend
-  (localhost vs cube). On-demand **autostart is a localhost-only affordance**
-  (systemd `--user` socket activation) — never attempted against remote cube.
+- **Client-facing wire contract → [ADR-0018](0018-client-facing-wire.md)** (now
+  drafted): one HTTP contract over UDS-local + TCP-remote, server-owned async jobs,
+  SSE progress, cancellation releasing the ADR-0011 lease, version handshake. It also
+  resolves the local-vs-remote selection, autostart (socket activation), and
+  persistence-ownership questions that were listed here.
+- **Remote auth/authz → a security ADR.** ADR-0018 fixes the *transport-derived*
+  model (UDS = OS perms; TCP = bearer token over TLS); token lifecycle/rotation, the
+  threat model, and mTLS still want a dedicated security ADR. Intersects consent/
+  retention (ADR-0013).
 - **Transition parity checklist.** Define concretely when the Rust CLI replaces the
   Python one. Risk: if the Python CLI stays the *in-process* path, the reference
   implementation never exercises the wire — mitigate with a thin Python wire-client
@@ -186,5 +182,6 @@ this ADR stays focused on the *language + boundary* decision.
 - Intersects (see Open questions): ADR-0002 (independent host deploys / versioning),
   ADR-0005 + ADR-0013/0014 (persistence ownership), ADR-0011 (lease vs cancellation),
   ADR-0013 (consent vs remote auth).
-- Forthcoming: a client-facing **wire-contract** ADR and a **security/auth** ADR.
+- [ADR-0018](0018-client-facing-wire.md) (the client-facing wire contract this
+  decision serves); forthcoming: a **security/auth** ADR.
 - Prior art: `whisper-client` (Rust CLI), `whisper-service` (Python backend).
