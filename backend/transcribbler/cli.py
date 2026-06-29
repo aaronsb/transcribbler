@@ -15,6 +15,7 @@ from . import __version__, env, probe, profiles
 from .canon import apply_canonicalization, build_evidence
 from .cores import asr_core, canonicalizer_core, diarizer_core
 from .ir import build_ir, validate_ir
+from .render import render
 
 
 def _cmd_probe(args: argparse.Namespace) -> int:
@@ -59,12 +60,24 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
         named = [s for s in ir["speakers"] if s.get("display_name")]
         print(f"  named {len(named)}/{len(ir['speakers'])} speakers", file=sys.stderr)
 
-    out = json.dumps(ir, indent=2, ensure_ascii=False)
-    if args.output:
-        Path(args.output).write_text(out + "\n")
-        print(f"wrote {args.output} ({len(ir['turns'])} turns, {ir['source']['duration_s']}s)", file=sys.stderr)
+    return _emit(render(ir, args.format), args.output, ir)
+
+
+def _cmd_render(args: argparse.Namespace) -> int:
+    path = Path(args.ir)
+    if not path.exists():
+        print(f"error: IR not found: {path}", file=sys.stderr)
+        return 2
+    ir = json.loads(path.read_text())
+    return _emit(render(ir, args.format), args.output, ir)
+
+
+def _emit(text: str, output: str | None, ir: dict) -> int:
+    if output:
+        Path(output).write_text(text)
+        print(f"wrote {output} ({len(ir['turns'])} turns, {ir['source']['duration_s']}s)", file=sys.stderr)
     else:
-        print(out)
+        sys.stdout.write(text)
     return 0
 
 
@@ -78,10 +91,17 @@ def main(argv: list[str] | None = None) -> int:
     t = sub.add_parser("transcribe", help="transcribe a file to Canonical IR")
     t.add_argument("audio", help="audio/video file")
     t.add_argument("-p", "--profile", required=True, help="path to a compute profile .toml")
-    t.add_argument("-o", "--output", help="write IR JSON here (default: stdout)")
+    t.add_argument("-o", "--output", help="write here (default: stdout)")
+    t.add_argument("-f", "--format", choices=["json", "md", "vtt"], default="json", help="output format (default: json)")
     t.add_argument("--no-diarize", action="store_true", help="skip diarization even if the profile enables it")
     t.add_argument("--no-canon", action="store_true", help="skip LLM speaker naming even if the profile enables it")
     t.set_defaults(func=_cmd_transcribe)
+
+    r = sub.add_parser("render", help="render an existing Canonical IR to md/vtt/json")
+    r.add_argument("ir", help="path to a Canonical IR .json")
+    r.add_argument("-f", "--format", choices=["json", "md", "vtt"], default="md", help="output format (default: md)")
+    r.add_argument("-o", "--output", help="write here (default: stdout)")
+    r.set_defaults(func=_cmd_render)
 
     env.load_env_file()  # make HF_TOKEN etc. available to cores
     args = parser.parse_args(argv)

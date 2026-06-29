@@ -5,8 +5,25 @@ One backend service, many thin clients, and a pipeline that turns ambient or
 on-demand audio into clean, speaker-attributed, named transcripts — without a
 heavy monolithic app you have to babysit.
 
-> Status: **design / architecture phase.** No code yet. The decisions behind this
-> system are recorded as ADRs in [`docs/architecture/`](docs/architecture/).
+> Status: **working MVP (CLI).** Transcription + speaker diarization → diarized
+> Markdown/VTT/JSON, on AMD (Vulkan ASR + ROCm diarization) via selectable GPU
+> profiles. Speaker *naming* is manual today (a one-row edit) with voiceprint
+> enrollment planned ([ADR-0016](docs/architecture/0016-speaker-naming-strategy.md));
+> an optional LLM naming pass exists but is off by default. Decisions are recorded
+> as ADRs in [`docs/architecture/`](docs/architecture/).
+
+## Quickstart (MVP)
+
+```bash
+# one-time: build whisper.cpp (Vulkan) + fetch a model — see backend/README.md
+uv run --project backend transcribbler probe                       # what GPUs are here
+uv run --project backend transcribbler transcribe call.m4a \
+    -p profiles/desktop-vulkan.toml -f md -o call.md               # diarized Markdown
+uv run --project backend transcribbler render call.ir.json -f vtt  # re-render IR → WebVTT
+```
+
+Output is the **Canonical IR** (`-f json`) or a readable view (`-f md` / `-f vtt`).
+A 57-min real conference transcribes + diarizes in ~2.5 min on an RX 7900 XTX.
 
 ---
 
@@ -151,12 +168,15 @@ and the Canonical IR contract in
 
 CLI-daemon-first (see [ADR-0008](docs/architecture/0008-build-order.md)):
 
-1. Backend service on cube (reuse whisper.cpp + pyannote + llama-swap) + Canonical IR.
-2. CLI client (batch files + YouTube), the `whisper-client` successor.
-3. Canonicalization stage (deterministic stitch + GBNF speaker/term mapping).
-4. CLI capture daemon (PipeWire ring buffer + VAD + prompt-to-keep).
-5. KDE tray client + desktop heuristics.
-6. VibeVoice "hard cases" backend; live-preview tier.
+1. ✅ Compute backend + **Canonical IR** — selectable GPU profiles (ADR-0015); validated schema + CI.
+2. ✅ ASR (whisper.cpp/Vulkan) + **diarization** (pyannote/ROCm) + overlap-alignment → diarized IR.
+3. ✅ **Renderers** — IR → Markdown / VTT / JSON (`transcribe -f` / `render`).
+4. ◻ Speaker **naming**: manual today; **voiceprint enrollment** next (ADR-0016). LLM naming exists, opt-in/off.
+5. ◻ Batch / directory + YouTube ingest (the `whisper-client` features).
+6. ◻ CLI capture daemon (PipeWire ring buffer + VAD + prompt-to-keep); then KDE tray.
+7. ◻ Run the same profiles on **cube** (CUDA); VibeVoice "hard cases" backend; live-preview tier.
+
+**MVP reached at 1–3:** point it at a recording, get a diarized, readable transcript.
 
 ## Hardware
 
