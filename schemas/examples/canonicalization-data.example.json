@@ -1,0 +1,9 @@
+{
+  "speaker_map": [
+    { "id": "S1", "display_name": "Aaron", "role": "host", "confidence": 0.86, "evidence": "introduces self at 0.4s" },
+    { "id": "S2", "display_name": "Dana", "role": "client", "confidence": 0.71, "evidence": "addressed as Dana at 12.1s" }
+  ],
+  "term_map": [
+    { "canonical": "Praecipio", "variants": ["precipio", "Precipeo", "pre-cipio"] }
+  ]
+}

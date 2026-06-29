@@ -1,0 +1,7 @@
+{
+  "schema_version": "0.1",
+  "source": { "kind": "session", "duration_s": 5 },
+  "backend": { "kind": "modular" },
+  "speakers": [{ "id": "bob", "source": "llm" }],
+  "turns": []
+}

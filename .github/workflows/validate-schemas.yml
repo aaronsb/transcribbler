@@ -1,0 +1,26 @@
+name: validate-schemas
+
+on:
+  push:
+    paths:
+      - "schemas/**"
+      - "requirements.txt"
+      - "Makefile"
+      - ".github/workflows/validate-schemas.yml"
+  pull_request:
+    paths:
+      - "schemas/**"
+      - "requirements.txt"
+      - "Makefile"
+      - ".github/workflows/validate-schemas.yml"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate schemas + fixtures
+        run: make validate-schemas   # creates an isolated venv and installs requirements.txt

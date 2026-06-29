@@ -1,0 +1,24 @@
+{
+  "schema_version": "0.1",
+  "source": {
+    "kind": "batch",
+    "uri": "file:///home/aaron/recordings/standup-2026-06-28.m4a",
+    "sha256": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+    "duration_s": 95.0
+  },
+  "backend": {
+    "kind": "joint",
+    "asr": "vibevoice-asr/9b"
+  },
+  "speakers": [
+    { "id": "S1", "display_name": "Aaron", "role": "facilitator", "confidence": 0.9, "source": "llm" },
+    { "id": "S2", "display_name": "Priya", "confidence": 0.64, "source": "llm" },
+    { "id": "S3", "source": "fallback" }
+  ],
+  "turns": [
+    { "speaker_id": "S1", "start": 0.0, "end": 4.2, "text": "Morning all, quick standup." },
+    { "speaker_id": "S2", "start": 4.5, "end": 11.8, "text": "I finished the ingest path; reviewing the diarizer wiring next." },
+    { "speaker_id": "S3", "start": 12.0, "end": 16.3, "text": "Nothing blocking on my end." }
+  ],
+  "tags": ["standup"]
+}
