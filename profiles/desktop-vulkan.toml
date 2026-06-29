@@ -10,7 +10,9 @@ binary = "/home/aaron/Projects/ai/whisper.cpp/build/bin/whisper-cli"
 model = "/home/aaron/Projects/ai/whisper.cpp/models/ggml-base.en.bin"
 
 [diar]
-engine = "none"                                                # diarization arrives in a later stage (ADR-0005)
+engine = "pyannote"                                            # PyTorch sidecar (torch-ROCm); ASR stays on Vulkan
+backend = "rocm"                                               # torch on AMD = ROCm (not Vulkan)
+model = "pyannote/speaker-diarization-community-1"             # HF-gated; needs accepted terms + HF_TOKEN
 
 [llm]
 engine = "llama.cpp"
