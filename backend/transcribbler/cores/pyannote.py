@@ -11,11 +11,11 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Callable
 from pathlib import Path
 
 from ..audio import normalize_wav
 from ..profiles import StageConfig
+from ..progress import ProgressEvent, ProgressSink, line_tap
 from .base import SpeakerTurn
 from .proc import run_streamed
 
@@ -24,31 +24,18 @@ _SIDECAR_DIR = Path(__file__).resolve().parents[2] / "diarizer"
 _SIDECAR_SCRIPT = _SIDECAR_DIR / "diarize.py"
 
 
-def _progress_renderer() -> Callable[[str], str | None]:
-    """Render the sidecar's `@@P@@\tstep\tcompleted\ttotal` lines as live status."""
-    last_step: str | None = None
-    last_pct = -1
-
-    def render(line: str) -> str | None:
-        nonlocal last_step, last_pct
-        if not line.startswith("@@P@@\t"):
-            return None  # human log line: kept in the error tail, not echoed
-        parts = line.rstrip("\n").split("\t")
-        if len(parts) != 4:
-            return None
-        _, step, completed, total = parts
-        try:
-            pct = min(100, int(100 * float(completed) / float(total))) if float(total) else 0
-        except ValueError:
-            return None
-        if step == last_step and pct == last_pct:
-            return None
-        # newline when the step changes (keep the finished step visible), else \r
-        prefix = "\n" if last_step not in (None, step) else "\r"
-        last_step, last_pct = step, pct
-        return f"{prefix}  diar {step:<13s} {pct:3d}%" + ("\n" if pct >= 100 else "")
-
-    return render
+def _parse_progress(line: str) -> ProgressEvent | None:
+    """Parse the sidecar's `@@P@@\tstep\tcompleted\ttotal` lines into a ProgressEvent."""
+    if not line.startswith("@@P@@\t"):
+        return None  # human log line: kept in the error tail, not echoed
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) != 4:
+        return None
+    _, step, completed, total = parts
+    try:
+        return ProgressEvent(stage="diar", step=step, completed=float(completed), total=float(total))
+    except ValueError:
+        return None
 
 
 class PyannoteCore:
@@ -61,7 +48,7 @@ class PyannoteCore:
             raise RuntimeError("HF_TOKEN not set (needed for the gated pyannote model)")
         self.model = cfg.model or "pyannote/speaker-diarization-community-1"
 
-    def diarize(self, audio_path: Path, *, progress: bool = False) -> list[SpeakerTurn]:
+    def diarize(self, audio_path: Path, *, progress: ProgressSink | None = None) -> list[SpeakerTurn]:
         with tempfile.TemporaryDirectory(prefix="transcribbler_diar_") as tmp:
             wav = normalize_wav(audio_path, Path(tmp) / "norm.wav")
             payload = self._run_sidecar(wav, progress=progress)
@@ -69,7 +56,7 @@ class PyannoteCore:
             SpeakerTurn(start=t["start"], end=t["end"], label=t["label"]) for t in payload.get("turns", [])
         ]
 
-    def _run_sidecar(self, wav: Path, *, progress: bool) -> dict:
+    def _run_sidecar(self, wav: Path, *, progress: ProgressSink | None) -> dict:
         cmd = [
             "uv",
             "run",
@@ -81,10 +68,11 @@ class PyannoteCore:
             "--model",
             self.model,
         ]
-        if progress:
+        if progress is not None:
             cmd.append("--progress")
+        on_line = line_tap(_parse_progress, progress) if progress is not None else None
         rc, out, tail = run_streamed(
-            cmd, stream=progress, env=os.environ.copy(), on_line=_progress_renderer()
+            cmd, stream=progress is not None, env=os.environ.copy(), on_line=on_line
         )
         if rc != 0:
             raise RuntimeError(f"diarizer sidecar failed ({rc}): {tail[-800:]}")

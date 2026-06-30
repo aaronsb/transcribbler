@@ -14,9 +14,8 @@ import sys
 from pathlib import Path
 
 from . import __version__, env, probe, profiles
-from .canon import apply_canonicalization, build_evidence
-from .cores import asr_core, canonicalizer_core, diarizer_core
-from .ir import build_ir, validate_ir
+from .pipeline import run_pipeline
+from .progress import stderr_sink
 from .render import render
 
 
@@ -48,30 +47,17 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
         print(f"error: profile {profile.name!r} has no ASR stage", file=sys.stderr)
         return 2
 
-    progress = args.progress if args.progress is not None else sys.stderr.isatty()
-
-    core = asr_core(profile.asr)
-    print(f"[{profile.name}] {core.name} ({profile.asr.backend}) → {audio.name}", file=sys.stderr)
-    segments = core.transcribe(audio, progress=progress, prompt=args.prompt)
-
-    diar_turns = None
-    if profile.diar.enabled and not args.no_diarize:
-        diarizer = diarizer_core(profile.diar)
-        print(f"  diarizing: {diarizer.name} ({profile.diar.backend})", file=sys.stderr)
-        diar_turns = diarizer.diarize(audio, progress=progress)
-        print(f"  {len(diar_turns)} speaker turns", file=sys.stderr)
-
-    ir = build_ir(segments, profile, audio, diar_turns=diar_turns)
-
-    if profile.llm.enabled and not args.no_canon:
-        canon = canonicalizer_core(profile.llm)
-        print(f"  canonicalizing: {canon.name} ({profile.llm.backend})", file=sys.stderr)
-        data = canon.canonicalize(build_evidence(ir))
-        ir = apply_canonicalization(ir, data)
-        validate_ir(ir)
-        named = [s for s in ir["speakers"] if s.get("display_name")]
-        print(f"  named {len(named)}/{len(ir['speakers'])} speakers", file=sys.stderr)
-
+    show = args.progress if args.progress is not None else sys.stderr.isatty()
+    ir = run_pipeline(
+        audio,
+        profile,
+        diarize=not args.no_diarize,
+        canon=not args.no_canon,
+        prompt=args.prompt,
+        asr_progress=stderr_sink() if show else None,
+        diar_progress=stderr_sink() if show else None,
+        log=lambda m: print(m, file=sys.stderr),
+    )
     return _emit(render(ir, args.format), args.output, ir)
 
 
