@@ -44,10 +44,13 @@ Canonical IR.**
 
 ### Transport — reuse the job wire; the chunk is the unit
 
-A finalized epoch chunk ([ADR-0009](0009-capture-cadence.md)) is submitted exactly like a
-batch job — multipart audio over UDS/TCP — but **live-class** and bound to a session.
-This reuses ADR-0018 wholesale: chunks are **server-owned, survive disconnect**, and flow
-through the same admission/queue/SSE machinery ([ADR-0019](0019-job-scheduling.md)).
+A finalized, silence-bounded **chunk** — the [ADR-0005](0005-diarization-flow.md) ASR
+work-unit / [ADR-0019](0019-job-scheduling.md) live unit, segmented client-side by the
+daemon's VAD ([ADR-0009](0009-capture-cadence.md)) — is submitted exactly like a batch
+job (multipart audio over UDS/TCP) but **live-class** and bound to a session. The session
+itself is the ADR-0009 **session epoch** (the whole conversation); chunks are sub-units
+within it. This reuses ADR-0018 wholesale: chunks are **server-owned, survive
+disconnect**, and flow through the same admission/queue/SSE machinery (ADR-0019).
 
 We **reject a raw continuous stream (WebSocket / chunked request body) for the durable
 path**, because:
@@ -68,43 +71,65 @@ this durable path — not in place of it. Deferred until the preview tier is bui
 
 A **live session** groups its chunks and carries the lease + live-mode signal:
 
-- `POST /v1/sessions` — open a session (compute-profile **name**, cadence). Acquires the
-  ADR-0011 keep-alive lease, enters ADR-0019 **live mode**. Returns a session id (an
-  unguessable UUID, owned by the caller-principal — same leak guard as jobs, ADR-0018).
-- `POST /v1/sessions/{id}/chunks` — submit one finalized chunk (multipart audio +
-  `seq` + `offset_s` + the ADR-0009 pre-roll lead-in). Live-class; admitted/queued per
+- `POST /v1/sessions` — open a session (compute-profile **name**, cadence). Takes an
+  ADR-0011 keep-alive **hold** (the lease is multi-holder), enters ADR-0019 **live mode**.
+  Returns a session id (an unguessable UUID, owned by the caller-**principal**
+  ([ADR-0020](0020-remote-access-security.md)) — same leak guard as jobs, ADR-0018).
+- `POST /v1/sessions/{id}/chunks` — submit one finalized chunk (multipart audio + `seq` +
+  `offset_s`). The daemon applies VAD + pre-roll (ADR-0009) when *forming* chunks; pre-roll
+  is an epoch-onset concern, not a per-chunk wire field. Live-class; admitted/queued per
   ADR-0019. Returns a chunk job id.
-- `GET /v1/sessions/{id}/events` — **SSE** multiplexing the session: per-chunk
-  `progress`, eager **preview** fragments (non-canonical), and lifecycle, ending in
+- `GET /v1/sessions/{id}/events` — **SSE** multiplexing the session: per-chunk `progress`,
+  eager **preview** fragments (chunk-cadence near-real-time, non-canonical — *distinct*
+  from the deferred sub-second Sortformer tier below), and lifecycle, ending in
   `finalized {ir_ref}`.
-- `POST /v1/sessions/{id}/finalize` — no more chunks; run the global-diarization
-  canonical pass over the accumulated audio → the session IR. Releases the lease.
+- `POST /v1/sessions/{id}/finalize` — no more chunks; run the global-diarization canonical
+  pass over the accumulated audio → the session IR. Releases this session's lease hold.
 - `DELETE /v1/sessions/{id}` — operator stop/discard ([ADR-0010](0010-operator-awareness-and-control.md));
-  releases the lease, drops buffered audio per retention ([ADR-0013](0013-retention-and-consent.md)).
+  releases the hold, drops buffered audio per retention ([ADR-0013](0013-retention-and-consent.md)).
+
+**Cadence × finalize** (ADR-0009): a **session**-cadence session emits provisional results
+during + the authoritative IR on finalize; a **turn**-cadence session emits *preview only*
+and produces **no** canonical IR — its finalize just closes the session and releases the
+hold.
+
+**Versioning** (ADR-0018): these endpoints are **additive** under `/v1` (no `/v2` needed),
+surfaced via a minor `wire_version` bump and a `live_ingest` entry in `GET /v1/version`
+`capabilities`, so a client detects an older backend that lacks live ingest rather than
+blind-`404`ing.
 
 `/v1/jobs` stays the batch shape; sessions/chunks are the live shape — distinct on the
 wire, sharing the job engine underneath.
 
-### Assembly — one session IR by deterministic merge + finalize re-diarization
+### Assembly — one session IR by deterministic stitch + finalize re-diarization
 
 A session produces a single `source.kind = "session"` Canonical IR (ADR-0006; `uri`/
-`sha256` omitted for ephemeral live). It is assembled by the **deterministic merge of
-[ADR-0014](0014-ir-epoch-session-identity.md)** — which this ADR **activates from
-Deferred**, since reassembling per-chunk results into one session document is exactly the
-case it was written for. Chunks carry `seq` + `offset_s`, and ASR provenance carries true
-offsets so stitching can't drift (ADR-0006).
+`sha256` omitted for ephemeral live). Assembly needs **no new merge machinery**:
 
-Reconciling the two tiers (ADR-0005/0019):
+- **Stitch** per-chunk ASR results by their true offsets — already guaranteed by
+  [ADR-0006](0006-canonical-ir-contract.md) (`provenance.offset_s`; "stitching can't
+  drift"). Chunks carry `seq` + `offset_s` on the wire.
+- **Reconcile speakers** with a single **global diarization pass at finalize**
+  ([ADR-0005](0005-diarization-flow.md) keystone — diarize the whole window).
 
-- **During the session**, finalized chunks yield **provisional** canonical results
-  incrementally (speaker ids may be chunk-local) plus, where available, fast preview
-  fragments. These are shown, not authoritative.
-- **On finalize**, a **global diarization pass** over the whole session reconciles
-  speaker identities end-to-end (the ADR-0005 keystone), producing the authoritative
-  session IR. This supersedes the provisional results.
+This is deliberately **not** the cross-epoch merge of
+[ADR-0014](0014-ir-epoch-session-identity.md): there are no peer canonical documents and
+no cross-*epoch* speaker-ID reconciliation (the global finalize pass removes the need).
+**ADR-0014 stays Deferred** — nested/composable cadence is *not* adopted here, in keeping
+with [ADR-0009](0009-capture-cadence.md)'s exclusive-profiles decision.
 
-This is the concrete form of ADR-0019's "canonical re-run is live-class, incremental per
-finalized segment, reconciled" and ADR-0009's "preview now + canonical on finalize."
+Reconciling the two tiers (ADR-0005/0019) — this **refines** the latent tension between
+ADR-0019's "incremental canonical per segment" and ADR-0005's whole-window keystone:
+
+- **During the session**, finalized chunks yield **provisional** results incrementally
+  (chunk-local speaker ids) plus, where available, fast preview fragments. Shown, **not
+  authoritative** — stable cross-speaker IDs are impossible before the window closes.
+- **On finalize**, the global diarization pass reconciles speaker identities end-to-end,
+  producing the authoritative session IR, which **supersedes** the provisional results.
+
+So ADR-0019's "canonical re-run is live-class, incremental per finalized segment,
+reconciled" is **narrowed here** to *provisional*-incremental during + *authoritative*-on-
+finalize — the only form compatible with ADR-0005's global-window rule.
 
 ### Never drop audio
 
@@ -114,19 +139,23 @@ retry/backoff. Because chunks are server-owned and the session id persists, a da
 loses the connection **reconnects and resumes** the same session; under backend
 contention text lags but **audio is never lost**.
 
+(The lease, client spool, and retention-on-discard lean on ADR-0011/0012/0013, still
+Proposed stubs; they **co-finalize with the capture daemon** ([ADR-0008](0008-build-order.md)),
+so this dependency is explicit, not assumed-settled.)
+
 ```mermaid
 sequenceDiagram
     participant D as Capture daemon (VAD + spool)
     participant B as Backend (live mode)
     D->>B: POST /v1/sessions  (profile, cadence)
-    B-->>D: session id  (lease acquired, live mode)
-    loop per silence-bounded epoch
+    B-->>D: session id  (hold taken, live mode)
+    loop per silence-bounded chunk
         D->>B: POST /sessions/{id}/chunks (audio, seq, offset)
         B-->>D: SSE: progress / preview (non-canonical)
     end
     D->>B: POST /sessions/{id}/finalize
     B->>B: global re-diarize accumulated audio (ADR-0005)
-    B-->>D: SSE: finalized {ir_ref}   (session IR; lease released)
+    B-->>D: SSE: finalized {ir_ref}   (session IR; hold released)
 ```
 
 ## Consequences
@@ -141,12 +170,11 @@ sequenceDiagram
   speaker stability ADR-0005 exists to protect; provisional results give immediacy without
   compromising the source of truth.
 - **Cadence maps cleanly** — preview fragments (turn) vs the session IR (session) fall out
-  of ADR-0009 with no new IR hierarchy beyond ADR-0014's merge.
+  of ADR-0009 with **no new IR machinery**: assembly is ADR-0006 stitch + ADR-0005 finalize,
+  and ADR-0014 stays deferred (no nested-cadence hierarchy).
 
 ### Bad / costs
 
-- **Activates ADR-0014** (epoch/session identity + deterministic merge), previously
-  deferred — real work in the IR assembly layer.
 - **Per-chunk job overhead** — many small submissions per session; mitigated by
   connection reuse and ADR-0019's "not-too-small" chunk sizing, but heavier than a raw
   stream would be.
@@ -175,9 +203,11 @@ sequenceDiagram
 
 - ADR-0018 (the wire this extends; resolves its deferred live path),
   ADR-0019 (live-class scheduling of these chunks; partial-singleton live mode),
+  ADR-0020 (the principal that owns a session + its chunks),
   ADR-0009 (client-side epochs; session→canonical, turn→preview),
   ADR-0005 (two tiers; global diarize on finalize),
-  ADR-0006 (`kind:"session"` IR), ADR-0014 (deterministic merge — activated here),
-  ADR-0011 (lease held for the session), ADR-0012 (client spool drains chunks),
+  ADR-0006 (`kind:"session"` IR; provenance offsets = the deterministic stitch),
+  ADR-0014 (stays Deferred — this path needs no nested/cross-epoch merge),
+  ADR-0011 (multi-holder lease; a session takes a hold), ADR-0012 (client spool drains chunks),
   ADR-0010 (operator stop/discard), ADR-0013 (retention of buffered live audio),
   ADR-0008 (capture daemon is the consumer of this path; preview tier is stage 6).
