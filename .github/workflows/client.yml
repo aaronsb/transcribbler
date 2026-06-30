@@ -1,0 +1,31 @@
+name: client
+
+on:
+  push:
+    paths:
+      - "clients/**"
+      - "schemas/canonical-ir.schema.json"
+      - ".github/workflows/client.yml"
+  pull_request:
+    paths:
+      - "clients/**"
+      - "schemas/canonical-ir.schema.json"
+      - ".github/workflows/client.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint (clippy)
+        run: cargo clippy --quiet -- -D warnings
+      - name: Tests (render parity)
+        run: cargo test --quiet
