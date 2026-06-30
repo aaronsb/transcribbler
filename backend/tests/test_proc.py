@@ -5,8 +5,9 @@ from __future__ import annotations
 import sys
 
 from transcribbler.cores.proc import run_streamed
-from transcribbler.cores.pyannote import _progress_renderer as diar_renderer
-from transcribbler.cores.whisper_cpp import _progress_renderer as asr_renderer
+from transcribbler.cores.pyannote import _parse_progress as diar_parse
+from transcribbler.cores.whisper_cpp import _parse_progress as asr_parse
+from transcribbler.progress import stderr_sink
 
 
 def test_captures_stdout_whole():
@@ -69,20 +70,24 @@ def test_dangling_progress_line_gets_closed(capsys):
     assert capsys.readouterr().err.endswith("\n")
 
 
-def test_asr_renderer_parses_and_dedupes():
-    render = asr_renderer()
-    assert render("whisper_print_progress_callback: progress =  10%") == "\r  ASR  10%"
-    assert render("whisper_print_progress_callback: progress =  10%") is None  # deduped
-    assert render("some unrelated line") is None
-    assert render("progress = 100%").endswith("\n")  # newline on completion
+def test_asr_progress_parses_and_renders():
+    sink = stderr_sink()
+    ev = asr_parse("whisper_print_progress_callback: progress =  10%")
+    assert ev is not None and ev.stage == "asr" and ev.pct == 10
+    assert sink(ev) == "\r  ASR  10%"
+    assert sink(ev) is None  # deduped
+    assert asr_parse("some unrelated line") is None
+    assert sink(asr_parse("progress = 100%")).endswith("\n")  # newline on completion
 
 
-def test_diar_renderer_handles_sentinel_and_step_change():
-    render = diar_renderer()
-    first = render("@@P@@\tsegmentation\t2\t10\n")
+def test_diar_progress_parses_and_renders_step_change():
+    sink = stderr_sink()
+    ev = diar_parse("@@P@@\tsegmentation\t2\t10\n")
+    assert ev is not None and ev.stage == "diar" and ev.step == "segmentation" and ev.pct == 20
+    first = sink(ev)
     assert "segmentation" in first and "20%" in first
-    assert render("@@P@@\tsegmentation\t2\t10\n") is None  # deduped
+    assert sink(ev) is None  # deduped
     # a new step starts with a newline so the finished step stays visible
-    nxt = render("@@P@@\tembeddings\t5\t10\n")
+    nxt = sink(diar_parse("@@P@@\tembeddings\t5\t10\n"))
     assert nxt.startswith("\n") and "embeddings" in nxt
-    assert render("not a sentinel line") is None
+    assert diar_parse("not a sentinel line") is None

@@ -11,33 +11,23 @@ from __future__ import annotations
 import json
 import re
 import tempfile
-from collections.abc import Callable
 from pathlib import Path
 
 from ..audio import normalize_wav
 from ..profiles import StageConfig
+from ..progress import ProgressEvent, ProgressSink, line_tap
 from .base import Segment
 from .proc import run_streamed
 
 _PROGRESS_RE = re.compile(r"progress\s*=\s*(\d+)%")
 
 
-def _progress_renderer() -> Callable[[str], str | None]:
-    """Turn whisper's `...progress = N%` stderr lines into a live `ASR N%`."""
-    last = -1
-
-    def render(line: str) -> str | None:
-        nonlocal last
-        m = _PROGRESS_RE.search(line)
-        if not m:
-            return None
-        pct = int(m.group(1))
-        if pct == last:
-            return None
-        last = pct
-        return f"\r  ASR {pct:3d}%" + ("\n" if pct >= 100 else "")
-
-    return render
+def _parse_progress(line: str) -> ProgressEvent | None:
+    """Parse whisper's `...progress = N%` stderr lines into a ProgressEvent."""
+    m = _PROGRESS_RE.search(line)
+    if not m:
+        return None
+    return ProgressEvent(stage="asr", completed=float(m.group(1)), total=100.0)
 
 
 class WhisperCppCore:
@@ -55,7 +45,7 @@ class WhisperCppCore:
         self.prompt = cfg.options.get("prompt")
 
     def transcribe(
-        self, audio_path: Path, *, progress: bool = False, prompt: str | None = None
+        self, audio_path: Path, *, progress: ProgressSink | None = None, prompt: str | None = None
     ) -> list[Segment]:
         with tempfile.TemporaryDirectory(prefix="transcribbler_") as tmp:
             wav = normalize_wav(audio_path, Path(tmp) / "norm.wav")
@@ -63,7 +53,7 @@ class WhisperCppCore:
             self._run(wav, out_prefix, progress=progress, prompt=prompt or self.prompt)
             return _parse(out_prefix.with_suffix(".json"))
 
-    def _run(self, wav: Path, out_prefix: Path, *, progress: bool, prompt: str | None) -> None:
+    def _run(self, wav: Path, out_prefix: Path, *, progress: ProgressSink | None, prompt: str | None) -> None:
         cmd = [
             self.binary,
             "-m",
@@ -79,7 +69,8 @@ class WhisperCppCore:
             # carry it across whisper's internal 30s windows so the bias holds
             # over the whole recording, not just the first window.
             cmd += ["--prompt", prompt, "--carry-initial-prompt"]
-        rc, _out, tail = run_streamed(cmd, stream=progress, on_line=_progress_renderer())
+        on_line = line_tap(_parse_progress, progress) if progress is not None else None
+        rc, _out, tail = run_streamed(cmd, stream=progress is not None, on_line=on_line)
         if rc != 0:
             raise RuntimeError(f"whisper-cli failed ({rc}): {tail[-500:]}")
 

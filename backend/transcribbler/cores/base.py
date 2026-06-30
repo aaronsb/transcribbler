@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from ..progress import ProgressSink
+
 
 @dataclass(frozen=True)
 class Segment:
@@ -35,12 +37,13 @@ class ASRCore(Protocol):
     name: str
 
     def transcribe(
-        self, audio_path: Path, *, progress: bool = False, prompt: str | None = None
+        self, audio_path: Path, *, progress: ProgressSink | None = None, prompt: str | None = None
     ) -> list[Segment]:
         """Transcribe a normalized audio file into chronological segments.
 
-        When ``progress`` is set, the core may stream live progress to stderr.
-        ``prompt`` is an optional initial prompt biasing decoding (names/jargon).
+        ``progress``, if given, receives :class:`~transcribbler.progress.ProgressEvent`s
+        as decoding proceeds. ``prompt`` is an optional initial prompt biasing
+        decoding (names/jargon).
         """
         ...
 
@@ -48,9 +51,9 @@ class ASRCore(Protocol):
 class DiarizerCore(Protocol):
     name: str
 
-    def diarize(self, audio_path: Path, *, progress: bool = False) -> list[SpeakerTurn]:
+    def diarize(self, audio_path: Path, *, progress: ProgressSink | None = None) -> list[SpeakerTurn]:
         """Diarize a normalized audio file into speaker turns over the whole file.
 
-        When ``progress`` is set, the core may stream live progress to stderr.
+        ``progress``, if given, receives :class:`~transcribbler.progress.ProgressEvent`s.
         """
         ...
