@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 use client::{Endpoint, SubmitOpts};
@@ -80,9 +80,13 @@ enum Cmd {
 
 fn endpoint(c: &ConnOpts) -> Result<Endpoint> {
     if let Some(url) = &c.url {
+        if url.starts_with("https://") {
+            // No TLS client yet (ADR-0020); accepting https:// and speaking
+            // cleartext would be a silent downgrade. Fail loudly instead.
+            bail!("remote TLS is not supported yet (ADR-0020); tunnel over SSH and use http://");
+        }
         let rest = url
             .strip_prefix("http://")
-            .or_else(|| url.strip_prefix("https://"))
             .unwrap_or(url)
             .trim_end_matches('/');
         let (host, port) = match rest.rsplit_once(':') {
@@ -181,7 +185,7 @@ async fn run() -> Result<i32> {
 
             let mut open_line = false;
             let terminal = client::stream_events(&ep, &created.id, |ev| {
-                open_line = render_progress(ev, open_line);
+                open_line = render_progress(ev);
             })
             .await?;
             if open_line {
@@ -220,7 +224,7 @@ async fn run() -> Result<i32> {
 
 /// Render a non-terminal SSE event to stderr; returns whether the line is left
 /// open (a `\r` progress write with no newline) so the caller can close it.
-fn render_progress(ev: &client::SseEvent, _open: bool) -> bool {
+fn render_progress(ev: &client::SseEvent) -> bool {
     match ev.event.as_str() {
         "queued" => {
             let ahead = ev.data.get("ahead").and_then(|v| v.as_i64()).unwrap_or(0);

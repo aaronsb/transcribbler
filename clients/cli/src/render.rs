@@ -151,6 +151,19 @@ mod tests {
     }
 
     #[test]
+    fn unknown_additive_fields_dont_break_md_vtt() {
+        // ADR-0018: an additive IR field keeps schema_version "0.1", so the
+        // codegen'd types must tolerate fields they don't know (no
+        // deny_unknown_fields) or render md/vtt would silently break.
+        let mut v = sample();
+        v["future_top_level"] = json!("hi");
+        v["turns"][0]["future_turn_field"] = json!(42);
+        v["speakers"][0]["future_speaker_field"] = json!(true);
+        assert!(render(&v, "md").is_ok());
+        assert!(render(&v, "vtt").is_ok());
+    }
+
+    #[test]
     fn ts_formats_hms_ms() {
         assert_eq!(ts(0.4), "00:00:00.400");
         assert_eq!(ts(3661.5), "01:01:01.500");

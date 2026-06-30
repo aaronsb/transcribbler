@@ -245,16 +245,18 @@ pub async fn stream_events(
         bail!("events stream failed: {}", String::from_utf8_lossy(&bytes));
     }
     let mut body = resp.into_body();
-    let mut buf = String::new();
+    // Buffer bytes (not a lossy String): a multi-byte UTF-8 char can be split
+    // across two chunks, so decode only once a whole frame is in hand.
+    let mut buf: Vec<u8> = Vec::new();
     while let Some(frame) = body.frame().await {
         let frame = frame.context("read sse frame")?;
         let Some(chunk) = frame.data_ref() else {
             continue;
         };
-        buf.push_str(&String::from_utf8_lossy(chunk));
-        while let Some(idx) = buf.find("\n\n") {
-            let raw: String = buf.drain(..idx + 2).collect();
-            if let Some(ev) = parse_sse(&raw) {
+        buf.extend_from_slice(chunk);
+        while let Some(idx) = find_subslice(&buf, b"\n\n") {
+            let raw: Vec<u8> = buf.drain(..idx + 2).collect();
+            if let Some(ev) = parse_sse(&String::from_utf8_lossy(&raw)) {
                 on_event(&ev);
                 if TERMINAL.contains(&ev.event.as_str()) {
                     return Ok(ev);
@@ -263,6 +265,10 @@ pub async fn stream_events(
         }
     }
     Err(anyhow!("event stream ended before a terminal event"))
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 fn parse_sse(raw: &str) -> Option<SseEvent> {
