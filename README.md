@@ -63,6 +63,22 @@ Clients send a profile **name** (server-side allowlist), never a path. Jobs run
 FIFO single-flight for now; the VRAM-budget scheduler + live mode (ADR-0019) and
 TCP bearer-token/TLS auth (ADR-0020) are separate, upcoming work.
 
+### Rust client (ADR-0017)
+
+A single static binary (`clients/cli`) speaks that wire — the successor to the
+prior `whisper-client`. Its IR types are **code-generated from `schemas/`** at
+build time, so they can't drift from the backend (the `/v1/version` handshake
+catches a mismatch). `transcribe` submits and streams live progress; `render`
+formats a local IR offline; `profiles`/`version` introspect the server.
+
+```bash
+make client                                      # cargo build → clients/cli/target/debug/transcribbler
+t=clients/cli/target/debug/transcribbler
+$t transcribe call.m4a -p desktop-vulkan -f md -o call.md   # over $XDG_RUNTIME_DIR/transcribbler.sock
+$t --url http://cube:8080 profiles               # or a remote backend over TCP
+$t render call.ir.json -f vtt                    # client-side render, no server
+```
+
 ---
 
 ## Why this exists

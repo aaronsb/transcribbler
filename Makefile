@@ -14,7 +14,9 @@ VENV          := .venv
 PY            := $(VENV)/bin/python
 SAMPLE        := $(WHISPER_DIR)/samples/jfk.wav
 
-.PHONY: help install uninstall build test check lint format validate-schemas backend-smoke clean update venv
+CLIENT        := clients/cli/Cargo.toml
+
+.PHONY: help install uninstall build test check lint format validate-schemas backend-smoke clean update venv client client-check
 
 help: ## List available targets
 	@awk 'BEGIN{FS=":.*##"} /^[a-zA-Z0-9_-]+:.*##/{printf "  \033[36m%-16s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -54,7 +56,15 @@ lint: ## Lint the backend (ruff)
 format: ## Auto-format the backend (ruff)
 	uv run --project backend --group dev ruff format backend/transcribbler backend/tests
 
-check: validate-schemas test lint ## Run all quality gates (schemas + tests + lint)
+check: validate-schemas test lint client-check ## Run all quality gates (schemas + backend + client)
+
+client: ## Build the Rust CLI client (clients/cli)
+	cargo build --manifest-path $(CLIENT)
+
+client-check: ## Rust client quality gates (fmt + clippy + tests)
+	cargo fmt --manifest-path $(CLIENT) --check
+	cargo clippy --manifest-path $(CLIENT) --quiet -- -D warnings
+	cargo test --manifest-path $(CLIENT) --quiet
 
 venv: ## Create the schema-validation venv (used by validate-schemas)
 	@test -d $(VENV) || python3 -m venv $(VENV)
