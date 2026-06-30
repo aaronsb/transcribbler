@@ -74,10 +74,21 @@ voiceprint:
   rather than silently wrong.
 - **Storage layout (now) — flat dir + record-level owner scoping.** All records live in the
   one `voiceprints/` dir; isolation between principals rests on the record `owner` field and
-  the JobStore's UUID + ownership check. Per-principal **on-disk isolation / encryption** is
-  the deferred piece (see *Multi-user* below), so adopting the flat layout now does not force
-  a storage rework when that policy lands — only a migration of where bytes sit, not of the
-  ownership model.
+  the JobStore's UUID + ownership check.
+- **At-rest encryption (envelope).** Each record's embedding bytes are sealed with a
+  per-record **data key**, itself wrapped by a backend-held **master key** (OS keyring, else a
+  `0600` file under `config_dir()`). AEAD (AES-GCM or XChaCha20-Poly1305), per-record nonce.
+  The server decrypts **on match** — it must, to compare — so this defends **disk/backup theft
+  and off-box copies**, the realistic single-box threat. It does **not** defend against root,
+  the backend process, or the server reading principal B's prints while serving A: that
+  runtime boundary is the per-principal **ownership check**, which encryption does not
+  strengthen (the server holds all keys). **Metadata stays cleartext** so `enumerate`/`inspect`
+  need no key; only embeddings are sealed. `DELETE` shreds the data key (crypto-erase) as well
+  as the bytes.
+- **Server-blind per-principal encryption is the deferred piece** (see *Multi-user* below) —
+  a key derived from a principal-held secret so the server *cannot* decrypt cross-principal.
+  Adopting envelope-at-rest + the flat layout now does not force a rework when that lands:
+  it rewraps existing data keys under per-principal keys, not a change to the ownership model.
 
 ### Enrollment — two-phase (extract job, then client-driven commit)
 
@@ -192,7 +203,12 @@ forward-compatible with a later sharing layer):
 - **Biometric residency policy on a shared always-on host** (the cube, [ADR-0002](0002-hardware-topology.md)) —
   who may store whose voice on shared hardware, and under what retention. This is heavier
   than, and distinct from, the ADR-0013 third-party-*consent* concern below, and needs its
-  own decision when multi-tenant use is real.
+  own decision when multi-tenant use is real. The mechanism it would adopt is **server-blind
+  per-principal encryption** (a key derived from a principal-held secret — passphrase, bearer-
+  token material, or an SSH-agent challenge — held only per request), which gives confidentiality
+  *from the server itself* but costs key-management UX and is unrecoverable on key loss, and
+  has no natural secret in the local UDS case (the OS uid already gates access). Envelope-at-
+  rest (above) is adopted **now**; this server-blind layer rewraps the same data keys later.
 - **Any cross-principal visibility or admin surface.**
 
 ### Biometric privacy (ADR-0013, ADR-0010)
@@ -206,7 +222,11 @@ the finalized policy.
 - **Consent is an obligation, not a UI nicety.** Enrolling a *third party's* voice is
   biometric capture; the enroll flow surfaces this (ADR-0010 not-covert). The retention/
   consent rules it follows land with ADR-0013.
-- **Deletion is real.** `DELETE` removes the embedding bytes, not just an index row.
+- **Deletion is real.** `DELETE` removes the embedding bytes and shreds the record's data key
+  (crypto-erase), not just an index row.
+- **Encrypted at rest.** Embedding bytes are sealed with a per-record data key under a
+  backend-held master key (envelope; see the store section) — defending disk/backup theft.
+  Server-blind per-principal encryption is deferred (*Multi-user*).
 - **Minimization.** Enumerate and inspect return metadata, not raw biometrics; the store is
   local and never synced off-box by this ADR.
 - **Off unless opted in.** Matching runs only when the store is non-empty *and* the profile
@@ -255,8 +275,13 @@ sequenceDiagram
   scores; defaults will need iteration on real recordings.
 - **Cold start on model change.** Re-embedding the diarizer invalidates stored centroids
   (different space); acceptable and surfaced, but it means a model swap costs re-enrollment.
-- **Biometric data at rest.** Even local + per-principal, the store is biometric and inherits
-  ADR-0013's obligations; the shared-host policy is left unresolved (deferred above).
+- **Biometric data at rest.** Even local + per-principal + envelope-encrypted, the store is
+  biometric and inherits ADR-0013's obligations; the shared-host policy is left unresolved
+  (deferred above).
+- **Master-key lifecycle.** Envelope-at-rest adds a backend master key to manage (keyring vs
+  `0600` file, and what happens on its loss — losing it crypto-erases the whole store). A
+  bounded, accepted cost for the disk-theft protection it buys; the server-blind per-principal
+  key is the heavier, deferred lifecycle.
 - **Per-chunk-of-lifecycle surface.** Several new routes + a store module + a matcher + a
   client enroll UX — more than a single PR; sliced below.
 
