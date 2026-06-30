@@ -87,6 +87,7 @@ def _job_state(job: Job) -> JobState:
         profile=job.profile.name,
         diarize=job.diarize,
         canon=job.canon,
+        cancel_requested=job.cancel_requested,
         error=err,
         ir=job.ir if job.status == JobStatus.done else None,
     )

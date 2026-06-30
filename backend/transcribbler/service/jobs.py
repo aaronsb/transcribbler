@@ -68,7 +68,17 @@ class Job:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         self._waiters.append(fut)
-        await fut
+        try:
+            await fut
+        finally:  # a client disconnecting mid-await shouldn't leave its future parked
+            with contextlib.suppress(ValueError):
+                self._waiters.remove(fut)
+
+
+def _discard_audio(job: Job) -> None:
+    """Remove a job's server-side temp upload. Safe to call more than once."""
+    with contextlib.suppress(OSError):
+        job.audio_path.unlink()
 
 
 def _classify(exc: Exception) -> tuple[str, str]:
@@ -84,7 +94,7 @@ def _classify(exc: Exception) -> tuple[str, str]:
         return "auth", msg
     if "out of memory" in low or "oom" in low or "vk_error_out_of_device_memory" in low:
         return "oom", msg
-    if isinstance(exc, FileNotFoundError) or "ffmpeg" in low or "invalid" in low:
+    if isinstance(exc, FileNotFoundError) or "ffmpeg" in low or "could not normalize" in low:
         return "bad_input", msg
     return "internal", msg
 
@@ -93,6 +103,9 @@ class JobStore:
     """Holds jobs, the pending FIFO, and the single worker that drains it."""
 
     def __init__(self) -> None:
+        # TODO(ADR-0013/0014): `jobs` grows unbounded — terminal jobs + their IR
+        # stay resident for the life of the process. Add eviction/TTL (or the
+        # durable store) when retention lands; fine for the single-user UDS default.
         self.jobs: dict[str, Job] = {}
         self.pending: list[Job] = []
         self._wake = asyncio.Event()
@@ -125,6 +138,7 @@ class JobStore:
                 self.pending.remove(job)
             job.status = JobStatus.canceled
             job.emit({"event": "canceled", "by": by})
+            _discard_audio(job)  # _run never runs for a queued-canceled job
             self._renumber()
         else:
             # Running: best-effort. We can't interrupt the in-flight subprocess
@@ -141,6 +155,7 @@ class JobStore:
             while self.pending:
                 job = self.pending.pop(0)
                 if job.status == JobStatus.canceled:
+                    _discard_audio(job)  # canceled between pop and here
                     continue
                 self._renumber()
                 return job
@@ -151,7 +166,13 @@ class JobStore:
         """The worker loop. One job at a time (single-flight)."""
         while True:
             job = await self._next()
-            await self._run(job)
+            try:
+                await self._run(job)
+            except Exception:  # one job must never wedge the queue; CancelledError still propagates
+                job.error_code, job.error_message = "internal", "worker fault"
+                job.status = JobStatus.error
+                job.emit({"event": "error", "code": "internal", "message": "worker fault"})
+                _discard_audio(job)
 
     async def _run(self, job: Job) -> None:
         loop = asyncio.get_running_loop()
@@ -197,8 +218,7 @@ class JobStore:
             job.status = JobStatus.error
             job.emit({"event": "error", "code": job.error_code, "message": job.error_message})
         finally:
-            with contextlib.suppress(OSError):
-                job.audio_path.unlink()
+            _discard_audio(job)
 
 
 def new_job_id() -> str:

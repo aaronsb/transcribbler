@@ -34,6 +34,9 @@ class JobState(BaseModel):
     profile: str
     diarize: bool
     canon: bool
+    # True once a DELETE on a still-running job is accepted (no `canceling` state
+    # in the lifecycle; the job goes terminal when the in-flight run returns).
+    cancel_requested: bool = False
     error: ErrorInfo | None = None
     ir: dict | None = None  # populated only when status == "done"
 

@@ -99,6 +99,18 @@ def test_cancel_queued_emits_canceled_and_renumbers():
     assert last_queued["position"] == 1 and last_queued["ahead"] == 0
 
 
+def test_cancel_queued_removes_temp_upload(tmp_path):
+    # A job canceled while still queued never enters _run, so its cleanup must
+    # happen in cancel() — otherwise the (large) upload leaks.
+    store = JobStore()
+    audio = tmp_path / "upload.wav"
+    audio.write_bytes(b"audio")
+    job = Job(id=new_job_id(), owner="a", profile=_fake_profile(), audio_path=audio)
+    store.submit(job)
+    store.cancel(job, by="a")
+    assert not audio.exists()
+
+
 # --- endpoint tests -------------------------------------------------------------
 
 
@@ -165,3 +177,13 @@ def test_cancel_endpoint(client):
     client.app.state.store.pending.append(job)
     r = client.delete(f"/v1/jobs/{job.id}")
     assert r.status_code == 200 and r.json()["status"] == "canceled"
+
+
+def test_cancel_running_job_signals_intent(client):
+    # A running job can't be killed mid-flight; DELETE records the request and
+    # the response reflects it so the client isn't left guessing.
+    job = _job(owner="uid:test")
+    job.status = JobStatus.running
+    client.app.state.store.jobs[job.id] = job
+    body = client.delete(f"/v1/jobs/{job.id}").json()
+    assert body["status"] == "running" and body["cancel_requested"] is True
