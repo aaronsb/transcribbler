@@ -39,6 +39,30 @@ Live ASR/diarization progress streams to stderr when it's a TTY (`--progress` /
 > `uv run --project backend transcribbler probe`. `make install` puts the
 > `transcribbler` launcher on `~/.local/bin` so you can drop the prefix.
 
+### Run as a service (ADR-0018)
+
+The same pipeline is also exposed over an HTTP contract — one app bound to a
+**Unix socket** locally (the default; the OS enforces access, no port, no token)
+or a TCP port remotely. Work is submitted as **server-owned async jobs** you
+watch over Server-Sent Events, so a long transcription survives a client
+disconnect.
+
+```bash
+transcribbler-serve                              # bind $XDG_RUNTIME_DIR/transcribbler.sock
+S=$XDG_RUNTIME_DIR/transcribbler.sock
+curl --unix-socket "$S" http://localhost/v1/version
+job=$(curl -s --unix-socket "$S" -F file=@call.m4a -F profile=desktop-vulkan \
+        http://localhost/v1/jobs | jq -r .id)
+curl -N --unix-socket "$S" http://localhost/v1/jobs/$job/events        # queued→progress→done
+curl --unix-socket "$S" "http://localhost/v1/jobs/$job/result?format=md"
+```
+
+Endpoints live under `/v1`: `POST /jobs`, `GET /jobs/{id}` (+ `/events`,
+`/result?format=`), `DELETE /jobs/{id}`, `GET /profiles`, `/healthz`, `/version`.
+Clients send a profile **name** (server-side allowlist), never a path. Jobs run
+FIFO single-flight for now; the VRAM-budget scheduler + live mode (ADR-0019) and
+TCP bearer-token/TLS auth (ADR-0020) are separate, upcoming work.
+
 ---
 
 ## Why this exists
