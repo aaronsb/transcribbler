@@ -29,6 +29,7 @@ Format: lightweight [MADR](https://adr.github.io/madr/)-style. One decision per 
 | [0020](0020-remote-access-security.md) | Remote access & security — per-locality tiers (UDS / SSH / direct) + principal model | Accepted |
 | [0021](0021-internet-cloud-worker.md) | Internet access via an authenticated cloud worker (deferred) | Proposed |
 | [0022](0022-live-audio-ingest.md) | Live audio ingest — sessionized chunk submission over the wire | Proposed |
+| [0023](0023-voiceprint-lifecycle.md) | Voiceprint lifecycle — enrollment, store & matching contract | Proposed |
 
 ## Conventions
 
