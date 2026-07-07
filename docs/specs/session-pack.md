@@ -98,10 +98,11 @@ its frontmatter (`blob:`, §5), not in its filename. Renaming the `.md` is safe.
 └── (tar root)
     ├── record.ir.json          # the extended Canonical IR — SOURCE OF TRUTH
     ├── session.md              # packed COPY of the loose .md at creation (self-describing)
+    ├── embeddings.json         # per-speaker embedding vectors (the extraction seed; §8)
     ├── audio/                  # compressed, speaker-isolated clips (active packs only)
+    │   ├── S0.opus
     │   ├── S1.opus
-    │   ├── S2.opus
-    │   └── You.opus
+    │   └── S2.opus
     └── renders/                # OPTIONAL cached renders (regenerable; never authoritative)
         └── transcript.srt
 ```
@@ -111,7 +112,15 @@ its frontmatter (`blob:`, §5), not in its filename. Renaming the `.md` is safe.
   names resolve at render time; per-turn confidence and per-segment embedding references live here.
 - **`session.md`** — a copy of the loose sidecar taken **at pack creation**, so the blob is
   self-describing. See §6.
-- **`audio/`** — compressed speaker-isolated clips, named by speaker id/UID, opus-class by default
+- **`embeddings.json`** — per-speaker embedding vectors, keyed by canonical speaker id
+  (`{spec_version, pack_uid, vectors: {"S0": [...], ...}}`). Written because the Canonical IR
+  schema is `additionalProperties: false` and cannot carry embeddings inline on speakers/turns
+  (§8.2). This is the **extraction seed**: `extract` reads it directly (fast, no re-diarize), so a
+  pack primes the voiceprint library even when `audio/` was not retained. Present in every pack;
+  clips in `audio/` are the substrate for *future* re-extraction, not the everyday extraction path.
+- **`audio/`** — compressed speaker-isolated clips, keyed by canonical speaker id (`audio/S0.opus`),
+  cut by **time-slicing** each speaker's own diarized turn spans from their source channel, opus-class
+  by default
   (codec swappable — the record references clips by role/UID + offset, not by codec). Present only
   while the pack is **active**; removed on finalize (§7). Clips double as
   [ADR-0024](../architecture/0024-live-speaker-identification.md) audition/adjudication exemplars,
@@ -247,11 +256,18 @@ an enrollment:
 ```
 extract(pack) -> list[VoiceprintUpdate]
 
-  # for each speaker UID in the pack:
-  #   pack.audio[uid]  ->  embedding(s)
-  #   ->  fold into library[uid]  (running-mean centroid + samples, matches library.py)
-  #   ->  record back-reference:  library[uid].sources += pack.blob
+  # for each speaker id in the pack:
+  #   pack.embeddings.json[id]     # the cached seed vector — fast path, no re-diarize
+  #   ->  fold into library[<pack_uid>-<name>]  (running-mean centroid + samples, per library.py)
+  #   ->  record back-reference:   library[uid].sources += pack.blob   (deduped → idempotent)
 ```
+
+The fast path reads the **cached `embeddings.json` seed** (written at capture from the session
+gallery's centroids), so extraction never has to re-diarize and works even on a finalized/`--no-audio`
+pack. The retained `audio/` clips are the substrate for **re-extraction under a better model** (the
+audio-gated re-process tier, §7), not the everyday route. Folding a `source` already present in a
+voiceprint's `sources` is a **no-op** — `extract` is idempotent, so `samples` cannot be inflated by
+re-running it.
 
 Any pack can improve a voiceprint incidentally; an **enrollment pack** (single speaker, clean,
 `tags: [enrollment, training]`) is purpose-built *ideal* training data feeding the identical
@@ -261,8 +277,18 @@ from every `meeting` pack with the new embedding model."
 ### 8.2 Voiceprint record format
 
 A voiceprint is **its own OKF document** under `library/`: markdown + frontmatter, with
-back-references to the session blobs its embeddings came from. (The embedding vector itself may live
-inline or in a sibling binary, sealed per ADR-0023; back-references are the graph edges.)
+back-references to the session blobs its embeddings came from. The per-speaker embedding **vector is
+carried in the pack's sibling `embeddings.json`** (§4) — keyed by canonical speaker id, sealed per
+ADR-0023 once encryption-at-rest lands — because the Canonical IR schema
+(`additionalProperties: false`) cannot hold it inline; the voiceprint's `sources` back-references
+are the graph edges.
+
+> **Implementation status (current build):** the voiceprint **record** is still stored as **one
+> JSON per voiceprint** (`library/<uid>.json`, `library.py`), *not* the md + frontmatter document
+> described below. The `sources` graph edge, running-mean `centroid`, and `samples` weight already
+> match this target; only the record *format* migration to md + frontmatter is outstanding, tracked
+> by **GitHub issue #29**. The `uid` is seeded `<pack_uid>-<name>` from the first pack, with
+> matching by name across packs (a returning speaker compounds one voiceprint).
 
 ```yaml
 ---

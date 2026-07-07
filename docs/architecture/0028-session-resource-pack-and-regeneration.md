@@ -1,7 +1,11 @@
 # ADR-0028: The session pack — one open, self-describing unit of persistence, with two-tier regeneration and universal voiceprint extraction
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-07-07
+- **Accepted**: 2026-07-07 — realized by PR #30 (enroll → session pack + universal `extract`) and
+  PR #31 (live capture/listen persist real packs with retained, time-sliced audio). See
+  **[Realized (as built)](#realized-as-built--prs-30-31)** for the sub-decisions the implementation
+  surfaced and what remains deferred.
 - **Deciders**: Aaron
 
 ## Context
@@ -227,16 +231,106 @@ consumers, and must not absorb them:
 
 ### Neutral
 
-- **Current build state (context, not a new decision):** live capture **already routes through the
-  Canonical IR** (`ir.assemble_session`, `source.kind = "session"`) and writes `ir.json` plus a
-  rendered `.md`; **XDG storage exists** (`paths.py`: `sessions/<id>/`, `library/`); and a durable
-  voiceprint **`library.py`** plus a stopgap read-aloud **`enroll`** already exist. The pack format
-  *formalizes and unifies* these — it does not introduce persistence from scratch, it names the
-  boundary and merges the enroll path into it.
+- **Current build state (as built, PRs #30/#31):** live capture and `enroll` now write a **real
+  session pack** — the record is the extended Canonical IR (`build_live_ir` in
+  `capture_persist.py`, `source.kind = "session"`), the operator's `-o` path becomes the pack's
+  `.md` sidecar, and a self-describing `…-blob.tar.gz` lands beside it carrying `record.ir.json`,
+  the `embeddings.json` seed, speaker-isolated `audio/` clips, and a `session.md` copy. This
+  **replaced** the earlier ad-hoc `<stem>.ir.json` + `.md` pair (there is no `ir.assemble_session`;
+  the WAV assembler is `capture_persist.assemble_session`, the IR builder is `build_live_ir`).
+  **XDG storage exists** (`paths.py`: `sessions/`, `library/`), and the enroll path is merged into
+  the pack rather than a separate store. The specifics that fell out of building this — streaming
+  audio retention, time-slice isolation, the embedding sidecar, idempotent extraction — are in
+  **[Realized (as built)](#realized-as-built--prs-30-31)** below.
 - The live view stays provisional ([ADR-0027](0027-robust-online-speaker-attribution.md)); the pack
   is what lets its provisional attribution be superseded later rather than frozen in markdown.
 - "Active vs finalized" becomes an operator-visible pack state, surfaced in awareness/control
   ([ADR-0010](0010-operator-awareness-and-control.md)) alongside deployment mode.
+
+## Realized (as built — PRs #30, #31)
+
+Building the model surfaced sub-decisions the ADR and spec did not yet capture. They are recorded
+here so the ADR matches the code. **Validated** = covered by unit tests (numpy-free, ffmpeg-guarded:
+`test_pack.py`, `test_capture_persist.py`). **Pending** = mechanism built but not yet exercised on
+real multi-hour live captures — the retention path is a spike to be re-confirmed on real sessions
+(follow-up task #12) before it hardens.
+
+- **Audio retention in a streaming, disk-bounded pipeline.** Live chunks are unlinked as they
+  stream — the [ADR-0009](0009-capture-cadence.md) backlog guard drops the oldest unprocessed chunk
+  rather than fill the disk — so retention cannot wait until drain: each *processed* chunk is
+  **retired** into a `retain/` dir (`_retire` in `capture.py`) instead of deleted. At drain,
+  `capture_persist.assemble_session` concatenates the retained stereo chunks into **one aligned
+  session wav**; a chunk missing from the middle (dropped by the guard, or discarded while
+  listening was paused) is **silence-filled** at its index offset so absolute turn timestamps still
+  line up with the audio for slicing. Opt out with `--no-audio` (no `retain/`, no clips; the pack
+  still writes — see the embedding-seed point). On **pack-build failure `retain/` is KEPT** so the
+  session's raw audio is recoverable; on success, or when zero turns were transcribed, it is
+  cleaned. *Validated:* gap-fill assembly and the with/without-audio persist paths. *Pending:*
+  behaviour under a genuine multi-hour capture with real backlog drops.
+- **Speaker isolation is by TIME-SLICING, not source separation.** A speaker's clip is cut from the
+  channel they were captured on — the **operator from the mic channel (0)**, each **remote from the
+  meeting-mix channel (1)** — by *that speaker's own diarized turn spans* (`build_speaker_clips` →
+  `_slice_channel`: one ffmpeg pass, `pan` → `asplit` → per-span `atrim` → `concat`). Overlapping
+  spans are coalesced, and the filtergraph is passed via `-filter_complex_script` (a file, not
+  argv) so a long meeting's hundreds of turns cannot blow the argv length limit. Temporal isolation
+  yields clean-enough voiceprint exemplars without separating overlapped speech. *Validated:*
+  channel + span isolation. This is what decision 5's "speaker-isolated clips" concretely means.
+- **The pack carries the embedding seed, so a capture primes the library even under `--no-audio`.**
+  Because the Canonical IR schema is `additionalProperties: false`
+  ([ADR-0006](0006-canonical-ir-contract.md); confirmed in `schemas/canonical-ir.schema.json`),
+  embeddings cannot ride inline on speakers or turns. The pack therefore carries per-speaker
+  vectors in a **sibling `embeddings.json`** at the blob root (`{spec_version, pack_uid, vectors}`,
+  keyed by canonical speaker id), **seeded at drain from the `SessionGallery` centroids**.
+  `extract` reads this cached sidecar — fast, no re-diarize — and folds it into the library; the
+  *retained audio* is what enables **future re-extraction with a better model**. This refines
+  decision 6 ("introspect the pack's audio → embeddings"): the **fast path reads cached
+  embeddings**; the **audio path is the re-extract substrate**, not the everyday extraction route.
+  A `--no-audio` pack still primes the library from the seed; it just cannot be re-processed later.
+  *Validated:* extract-from-sidecar and the seed-attaches-by-label mapping (a gallery centroid whose
+  label never reached the transcript is dropped, not mis-attributed).
+- **`extract` is idempotent.** A pack already recorded in a voiceprint's `sources` is **not
+  re-folded** (`library.enroll`: `source in existing.sources → return`), so `samples` — the
+  running-mean weight and confidence signal — cannot be inflated by re-running extraction. Re-embedding
+  a recorded pack under a *new model* is a known v0.1 gap (it needs per-source replacement, not
+  another fold). *Validated.*
+- **Voiceprint uid = `<pack_uid>-<name>`, but matching is by name.** A brand-new voiceprint's id is
+  seeded from the **first** pack that produced it (`extract` → `enroll(uid=f"{pack_uid}-{slug(name)}")`);
+  thereafter matching is **by display name across packs** (`find_by_name`, case-insensitive), so
+  re-enrollment / re-capture of the same person **compounds one voiceprint** rather than minting
+  duplicates. The deliberate tradeoff: distinct people sharing a display name — or the generic
+  operator/`You` and `Remote` buckets — **collapse into one voiceprint**. Disambiguating genuine
+  name collisions is deferred to teaching-mode adjudication ([ADR-0029](0029-teaching-mode-ux.md)).
+  *Validated:* name-match compounding.
+- **Codec fallback keeps the pack over the codec.** Clips are transcoded to **opus** when the
+  ffmpeg build has `libopus`; when it does not, the **source clip is kept** under its own extension
+  (`_to_opus` returns `False` → `audio/<id><srcext>`) rather than losing the pack's audio — the
+  spec's §4 "codec-swappable, referenced by role/UID not codec" made concrete. The voiceprint fold
+  never needs the clip at all (it reads `embeddings.json`), so a missing encoder never blocks
+  extraction. *Validated.*
+- **`capture.py` split at its persist seam.** Honouring this ADR's own cost bullet ("split
+  `capture.py` at its natural seams, don't grow it"), the **drain-and-persist seam moved to a new
+  `capture_persist.py`** (`assemble_session`, `persist_session_pack`); `capture.py`'s net change is
+  the `_retire` hook plus a thinner `finally`. `pack.py` holds `write_pack` / `extract` /
+  `build_speaker_clips`.
+
+### Deferred / not-yet-realized
+
+The ADR decides more than the build has realized; these are honestly open so the ADR does not
+over-claim:
+
+- **Decision 7 — the voiceprint library as md + frontmatter documents — is NOT built yet.**
+  `library.py` still stores **one JSON per voiceprint** (`<uid>.json`), not the OKF
+  md + frontmatter form. The provenance graph edge that decision 7 needs **does** exist (the record
+  carries `sources` back-references to the blobs it was extracted from), so the graph is walkable;
+  only the record *format* migration remains, tracked by **GitHub issue #29**.
+- **Decision 8 — finalize / TTL / crypto-erase — is NOT implemented.** Packs are always written
+  `state: active`; audio is never stripped, no TTL runs, and there is no data-key shred. The
+  lifecycle *states* are specified (spec §7) but only the `active` half is exercised. This stays
+  blocked on [ADR-0013](0013-retention-and-consent.md)'s consent/retention *policy* co-finalizing.
+- **Corpus-priming of live sessions from prior packs is NOT built** — it remains the scope-boundary
+  future item (an implementation plus an
+  [ADR-0024](0024-live-speaker-identification.md)/[ADR-0027](0027-robust-online-speaker-attribution.md)
+  amendment). The seed/`extract` path lays its substrate but does not yet feed a live session.
 
 ## Alternatives considered
 
