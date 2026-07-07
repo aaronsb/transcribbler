@@ -61,6 +61,32 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
     return _emit(render(ir, args.format), args.output, ir)
 
 
+def _cmd_capture(args: argparse.Namespace) -> int:
+    from .capture import run_capture
+
+    try:
+        profile_path = profiles.resolve(args.profile)
+    except profiles.ProfileError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    profile = profiles.load(profile_path)
+    if not profile.asr.enabled:
+        print(f"error: profile {profile.name!r} has no ASR stage", file=sys.stderr)
+        return 2
+    run_capture(
+        profile,
+        Path(args.output),
+        app=args.app,
+        mic=args.mic,
+        meeting=args.meeting,
+        segment_s=args.segment,
+        diarize=not args.no_diarize,
+        threshold=args.threshold,
+        log=lambda m: print(m, file=sys.stderr),
+    )
+    return 0
+
+
 def _cmd_render(args: argparse.Namespace) -> int:
     path = Path(args.ir)
     if not path.exists():
@@ -115,6 +141,20 @@ def main(argv: list[str] | None = None) -> int:
         help="initial prompt to bias ASR spelling (names, jargon); overrides the profile's [asr] prompt",
     )
     t.set_defaults(func=_cmd_transcribe)
+
+    c = sub.add_parser("capture", help="live-capture mic+meeting → rolling transcript on disk")
+    c.add_argument("-o", "--output", required=True, help="transcript file to append to")
+    c.add_argument("-p", "--profile", help="compute profile (auto-selected if omitted)")
+    c.add_argument("--app", default="Google Chrome", help="meeting app to match for path detection")
+    c.add_argument("--mic", help="override: PipeWire source for the operator mic")
+    c.add_argument("--meeting", help="override: PipeWire monitor source for meeting audio")
+    c.add_argument("--segment", type=int, default=45, help="chunk length in seconds (default: 45)")
+    c.add_argument("--no-diarize", action="store_true", help="skip remote-speaker diarization")
+    c.add_argument(
+        "--threshold", type=float, default=0.5,
+        help="voiceprint cosine match threshold for session-stable speakers (default: 0.5)",
+    )
+    c.set_defaults(func=_cmd_capture)
 
     r = sub.add_parser("render", help="render an existing Canonical IR to md/vtt/json")
     r.add_argument("ir", help="path to a Canonical IR .json")
