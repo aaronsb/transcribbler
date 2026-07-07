@@ -27,9 +27,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .align import align
-from .cores import asr_core, diarizer_core
+from .cores import asr_core
+from .diarizer_daemon import DiarizerDaemon
 from .profiles import Profile
+from .session_gallery import SessionGallery
 
 Log = Callable[[str], None]
 
@@ -189,11 +190,22 @@ def _mean_db_file(wav: Path) -> float:
     return float(m.group(1)) if m else -120.0
 
 
+def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+    return max(0.0, min(a1, b1) - max(a0, b0))
+
+
 def _transcribe_chunk(
     chunk: Path, offset_s: float, profile: Profile, workdir: Path,
-    *, diarize: bool, gate_db: float, operator_label: str, say: Log,
+    *, daemon: DiarizerDaemon | None, gallery: SessionGallery | None,
+    gate_db: float, operator_label: str, say: Log,
 ) -> list[Turn]:
-    """Two-channel transcription of one chunk → absolute-timed turns."""
+    """Two-channel transcription of one chunk → absolute-timed turns.
+
+    Operator channel → ASR labeled by channel. Meeting channel → ASR; if a diarizer
+    daemon is given, each ASR segment is attributed to the *session-stable* speaker
+    id (via the gallery) whose diarized turn overlaps it most. Without a daemon, all
+    remote speech collapses to a single ``Remote`` bucket.
+    """
     asr = asr_core(profile.asr)
     turns: list[Turn] = []
 
@@ -204,24 +216,29 @@ def _transcribe_chunk(
             if s.text.strip():
                 turns.append(Turn(offset_s + s.start, offset_s + s.end, operator_label, s.text.strip()))
 
-    # meeting channel: ASR (+ optional diarization of the remote speakers)
+    # meeting channel: ASR, then attribute each segment to a session-stable speaker
     mtg_wav = _split_channel(chunk, workdir / "meeting.wav", 1)
     if _mean_db_file(mtg_wav) >= gate_db:
-        segs = asr.transcribe(mtg_wav)
-        if diarize and profile.diar.enabled:
+        segs = [s for s in asr.transcribe(mtg_wav) if s.text.strip()]
+        stitched: list[tuple[float, float, str]] | None = None
+        if daemon is not None and gallery is not None and segs:
             try:
-                diar = diarizer_core(profile.diar).diarize(mtg_wav)
-                _, aligned = align(segs, diar)
-                for a in aligned:
-                    if a.text.strip():
-                        turns.append(Turn(offset_s + a.start, offset_s + a.end, a.speaker_id, a.text.strip()))
-            except Exception as e:  # diarizer flaked — degrade to a single remote speaker
+                res = daemon.diarize(mtg_wav)
+                mapping = gallery.assign_chunk(res.get("speakers", []))
+                stitched = [
+                    (t["start"], t["end"], mapping.get(t["label"], "Remote"))
+                    for t in res.get("turns", [])
+                ]
+            except Exception as e:  # daemon flaked — degrade to one remote bucket
                 say(f"  (diarize failed, remote→one speaker: {e})")
-                diarize = False
-        if not (diarize and profile.diar.enabled):
-            for s in segs:
-                if s.text.strip():
-                    turns.append(Turn(offset_s + s.start, offset_s + s.end, "Remote", s.text.strip()))
+                stitched = None
+        for s in segs:
+            label = "Remote"
+            if stitched:
+                best = max(stitched, key=lambda t: _overlap(s.start, s.end, t[0], t[1]), default=None)
+                if best is not None and _overlap(s.start, s.end, best[0], best[1]) > 0.0:
+                    label = best[2]
+            turns.append(Turn(offset_s + s.start, offset_s + s.end, label, s.text.strip()))
 
     turns.sort(key=lambda t: t.start)
     return turns
@@ -241,6 +258,7 @@ def run_capture(
     meeting: str | None = None,
     segment_s: int = 45,
     diarize: bool = True,
+    threshold: float = 0.5,
     gate_db: float = -55.0,
     operator_label: str = "You",
     workdir: Path | None = None,
@@ -264,6 +282,10 @@ def run_capture(
     if meeting:
         paths = Paths(mic=paths.mic, meeting=meeting)
 
+    use_diar = diarize and profile.diar.enabled
+    gallery = SessionGallery(threshold) if use_diar else None
+    daemon = DiarizerDaemon(profile.diar.model, work, log=say) if use_diar else None
+
     say(f"capturing → {out_path} (Ctrl-C to stop)")
     out = None
     proc = None
@@ -285,7 +307,8 @@ def run_capture(
         try:
             turns = _transcribe_chunk(
                 chunk, n * segment_s, profile, work,
-                diarize=diarize, gate_db=gate_db, operator_label=operator_label, say=say,
+                daemon=daemon, gallery=gallery, gate_db=gate_db,
+                operator_label=operator_label, say=say,
             )
         except Exception as e:  # one bad chunk must not kill the whole session
             say(f"  chunk {n:05d}: skipped ({type(e).__name__}: {e})")
@@ -306,6 +329,8 @@ def run_capture(
         out.flush()
         ff_log = (work / "ffmpeg.log").open("wb")
         proc = _ffmpeg_segmenter(paths, work, segment_s, ff_log)
+        if daemon is not None:
+            daemon.start()  # one-time model load; ffmpeg is already capturing
         while True:
             if proc.poll() is not None:
                 tail = (work / "ffmpeg.log").read_bytes()[-500:].decode(errors="replace")
@@ -342,5 +367,7 @@ def run_capture(
         if out is not None:
             for n in _chunk_indices():
                 if n not in processed:
-                    _process(n)
+                    _process(n)  # drain uses the daemon, so close it after
             out.close()
+        if daemon is not None:
+            daemon.close()

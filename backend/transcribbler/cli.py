@@ -81,6 +81,7 @@ def _cmd_capture(args: argparse.Namespace) -> int:
         meeting=args.meeting,
         segment_s=args.segment,
         diarize=not args.no_diarize,
+        threshold=args.threshold,
         log=lambda m: print(m, file=sys.stderr),
     )
     return 0
@@ -149,6 +150,10 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--meeting", help="override: PipeWire monitor source for meeting audio")
     c.add_argument("--segment", type=int, default=45, help="chunk length in seconds (default: 45)")
     c.add_argument("--no-diarize", action="store_true", help="skip remote-speaker diarization")
+    c.add_argument(
+        "--threshold", type=float, default=0.5,
+        help="voiceprint cosine match threshold for session-stable speakers (default: 0.5)",
+    )
     c.set_defaults(func=_cmd_capture)
 
     r = sub.add_parser("render", help="render an existing Canonical IR to md/vtt/json")
