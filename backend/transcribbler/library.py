@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import paths
+from . import frontmatter, paths
 from .session_gallery import cosine
+
+SPEC_VERSION = "0.1"
 
 
 @dataclass
@@ -33,31 +35,84 @@ class Voiceprint:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _path(uid: str) -> Path:
+# A voiceprint is an OKF document (session-pack spec §8.2): a `<uid>.md` (frontmatter + a human
+# body) plus a sibling `<uid>.vec.json` holding the 256-d centroid — the vector stays out of the
+# YAML so the record reads/diffs cleanly. Records written before this (bare `<uid>.json`) are still
+# read, and migrated to the md form the next time they're saved.
+def _md_path(uid: str) -> Path:
+    return paths.library_dir() / f"{uid}.md"
+
+
+def _vec_path(uid: str) -> Path:
+    return paths.library_dir() / f"{uid}.vec.json"
+
+
+def _legacy_path(uid: str) -> Path:
     return paths.library_dir() / f"{uid}.json"
 
 
-def load(uid: str) -> Voiceprint | None:
-    p = _path(uid)
+def _meta(vp: Voiceprint) -> dict:
+    return {
+        "spec_version": SPEC_VERSION,
+        "uid": vp.uid,
+        "type": "voiceprint",
+        "name": vp.name,
+        "samples": vp.samples,
+        "updated": vp.updated,
+        "sources": vp.sources,
+    }
+
+
+def _load_md(uid: str) -> Voiceprint | None:
+    md, vec = _md_path(uid), _vec_path(uid)
+    if not md.exists() or not vec.exists():  # a record without its vector is incomplete
+        return None
+    m = frontmatter.parse(md.read_text())
+    return Voiceprint(
+        uid=m.get("uid", uid),
+        name=m.get("name", ""),
+        centroid=json.loads(vec.read_text()),
+        samples=int(m.get("samples", 1)),
+        updated=m.get("updated", ""),
+        sources=list(m.get("sources") or []),
+    )
+
+
+def _load_legacy(uid: str) -> Voiceprint | None:
+    p = _legacy_path(uid)
     if not p.exists():
         return None
-    return Voiceprint(**json.loads(p.read_text()))
+    try:
+        return Voiceprint(**json.loads(p.read_text()))
+    except (ValueError, TypeError):
+        return None
+
+
+def load(uid: str) -> Voiceprint | None:
+    return _load_md(uid) or _load_legacy(uid)
 
 
 def load_all() -> list[Voiceprint]:
     d = paths.library_dir()
     if not d.exists():
         return []
-    out: list[Voiceprint] = []
+    out: dict[str, Voiceprint] = {}
+    for p in sorted(d.glob("*.md")):
+        vp = _load_md(p.stem)
+        if vp is not None:
+            out[vp.uid] = vp
     for p in sorted(d.glob("*.json")):
-        try:
-            out.append(Voiceprint(**json.loads(p.read_text())))
-        except (ValueError, TypeError):
-            pass  # ignore anything that isn't a voiceprint record
-    return out
+        if p.name.endswith(".vec.json"):
+            continue  # a sibling vector, not a record
+        if (d / f"{p.stem}.md").exists():
+            continue  # already migrated to md — that copy wins
+        vp = _load_legacy(p.stem)
+        if vp is not None:
+            out.setdefault(vp.uid, vp)
+    return list(out.values())
 
 
 def find_by_name(name: str) -> Voiceprint | None:
@@ -69,7 +124,9 @@ def find_by_name(name: str) -> Voiceprint | None:
 
 def save(vp: Voiceprint) -> None:
     paths.ensure(paths.library_dir())
-    _path(vp.uid).write_text(json.dumps(asdict(vp), indent=2))
+    _md_path(vp.uid).write_text(frontmatter.emit(_meta(vp)) + f"\n# {vp.name}\n")
+    _vec_path(vp.uid).write_text(json.dumps(vp.centroid))
+    _legacy_path(vp.uid).unlink(missing_ok=True)  # migrate off the old JSON record
 
 
 def _fold(centroid: list[float], count: int, emb: list[float]) -> list[float]:

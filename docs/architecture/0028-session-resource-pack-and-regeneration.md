@@ -312,17 +312,20 @@ real multi-hour live captures — the retention path is a spike to be re-confirm
   `capture_persist.py`** (`assemble_session`, `persist_session_pack`); `capture.py`'s net change is
   the `_retire` hook plus a thinner `finally`. `pack.py` holds `write_pack` / `extract` /
   `build_speaker_clips`.
+- **Decision 7 realized — the voiceprint library is OKF md + frontmatter (issue #29).** Each
+  voiceprint is now a `library/<uid>.md` (frontmatter `spec_version`/`uid`/`type: voiceprint`/
+  `name`/`samples`/`updated`/`sources[]` + a human body) with the 256-d centroid in a sibling
+  `<uid>.vec.json` — the vector stays out of the YAML so the record reads/diffs cleanly. The shared
+  hand-rolled emitter/parser (`frontmatter.py`, used by both `pack.py` and `library.py`, no YAML
+  dependency) round-trips it, and a real YAML reader parses it (the OKF format-not-platform test).
+  Legacy `<uid>.json` records are still read and migrated to the md form on next save. *Validated:*
+  frontmatter round-trip, md write + sibling vector, legacy read + migrate.
 
 ### Deferred / not-yet-realized
 
 The ADR decides more than the build has realized; these are honestly open so the ADR does not
 over-claim:
 
-- **Decision 7 — the voiceprint library as md + frontmatter documents — is NOT built yet.**
-  `library.py` still stores **one JSON per voiceprint** (`<uid>.json`), not the OKF
-  md + frontmatter form. The provenance graph edge that decision 7 needs **does** exist (the record
-  carries `sources` back-references to the blobs it was extracted from), so the graph is walkable;
-  only the record *format* migration remains, tracked by **GitHub issue #29**.
 - **Decision 8 — finalize / TTL / crypto-erase — is NOT implemented.** Packs are always written
   `state: active`; audio is never stripped, no TTL runs, and there is no data-key shred. The
   lifecycle *states* are specified (spec §7) but only the `active` half is exercised. This stays
