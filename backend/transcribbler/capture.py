@@ -20,6 +20,9 @@ system defaults — the meeting is frequently not on the default sink.
 
 from __future__ import annotations
 
+import array
+import json
+import math
 import re
 import subprocess
 import threading
@@ -28,9 +31,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import render
 from .attribution import Attributed, is_repeat, split_segment_by_turns
 from .cores import asr_core
 from .diarizer_daemon import DiarizerDaemon
+from .ir import build_live_ir
 from .profiles import Profile
 from .session_gallery import SessionGallery
 
@@ -218,6 +223,57 @@ def _mean_db_file(wav: Path) -> float:
     return float(m.group(1)) if m else -120.0
 
 
+def _energy_envelope(wav: Path, *, frame_s: float = 0.05, decim: int = 4) -> list[float]:
+    """Per-frame RMS (dBFS) loudness curve of a mono 16k wav.
+
+    Reads the PCM once and decimates for speed (the backend has no numpy); each entry
+    is one ``frame_s``-second frame. Lets the operator and meeting channels be compared
+    span-by-span for bleed rejection.
+    """
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(wav),
+             "-ar", "16000", "-ac", "1", "-f", "s16le", "-"],
+            capture_output=True, timeout=_FFMPEG_OP_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return []
+    a = array.array("h")
+    a.frombytes(proc.stdout[: len(proc.stdout) // 2 * 2])
+    if decim > 1:
+        a = a[::decim]
+    win = max(1, int((16000 // decim) * frame_s))
+    env: list[float] = []
+    for i in range(0, len(a), win):
+        seg = a[i : i + win]
+        if not seg:
+            break
+        rms = math.sqrt(sum(x * x for x in seg) / len(seg))
+        env.append(20 * math.log10(rms / 32768) if rms > 0 else -120.0)
+    return env
+
+
+def _mean_db(env: list[float], s0: float, s1: float, frame_s: float = 0.05) -> float:
+    """Mean loudness (dBFS) of ``env`` over ``[s0, s1]`` seconds, averaged in power."""
+    if not env:
+        return -120.0
+    lo = max(0, int(s0 / frame_s))
+    hi = min(len(env), int(s1 / frame_s) + 1)
+    frames = env[lo:hi] or [env[min(lo, len(env) - 1)]]
+    lin = [10 ** (d / 10) for d in frames]
+    return 10 * math.log10(sum(lin) / len(lin))
+
+
+def _denoise(src: Path, dst: Path) -> Path:
+    """Spectral denoise (ffmpeg afftdn) — no model/dependency; for the meeting channel."""
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+         "-af", "afftdn=nr=12", "-ar", "16000", "-ac", "1", str(dst)],
+        check=True, timeout=_FFMPEG_OP_TIMEOUT,
+    )
+    return dst
+
+
 def _concat(chunks: list[Path], dst: Path) -> Path:
     """Concatenate same-format stereo chunks into one wav (pass a single through)."""
     if len(chunks) == 1:
@@ -268,7 +324,7 @@ def _transcribe_window(
     profile: Profile, workdir: Path,
     *, daemon: DiarizerDaemon | None, gallery: SessionGallery | None,
     prev_sid_turns: list[tuple[float, float, str]], shared_span: tuple[float, float],
-    gate_db: float, operator_label: str, say: Log,
+    gate_db: float, operator_label: str, bleed_reject_db: float, denoise: bool, say: Log,
 ) -> tuple[list[Turn], list[tuple[float, float, str]]]:
     """Transcribe one overlapping window; emit only turns in ``[emit_lo, emit_hi)``.
 
@@ -288,18 +344,30 @@ def _transcribe_window(
     def _owned(seg) -> bool:
         return emit_lo <= win_start + seg.start < emit_hi
 
-    # operator channel (mic = channel 0): identified by channel, no diarization
     mic_wav = _split_channel(window_wav, workdir / "mic.wav", 0)
+    mtg_wav = _split_channel(window_wav, workdir / "meeting.wav", 1)
+    # loudness curves to reject far-end bleed from the operator channel
+    mic_env = _energy_envelope(mic_wav)
+    mtg_env = _energy_envelope(mtg_wav)
+
+    # operator channel (mic = channel 0): identified by channel, no diarization. A
+    # segment is kept only if the mic is *near-end dominant* over its span — if the
+    # meeting channel is louder there by more than bleed_reject_db, it's the far end
+    # coming back through the mic (speaker bleed), not the operator.
     if _mean_db_file(mic_wav) >= gate_db:
         for s in asr.transcribe(mic_wav):
-            if s.text.strip() and _owned(s):
-                turns.append(Turn(win_start + s.start, win_start + s.end, operator_label, s.text.strip()))
+            if not (s.text.strip() and _owned(s)):
+                continue
+            if _mean_db(mtg_env, s.start, s.end) - _mean_db(mic_env, s.start, s.end) > bleed_reject_db:
+                continue  # meeting dominates this span → bleed, not the operator
+            turns.append(Turn(win_start + s.start, win_start + s.end, operator_label, s.text.strip()))
 
-    # meeting channel (channel 1): ASR, diarize the whole window, link, split-attribute
-    mtg_wav = _split_channel(window_wav, workdir / "meeting.wav", 1)
+    # meeting channel (channel 1): ASR (optionally denoised), diarize the RAW audio
+    # (embeddings from the unfiltered signal), link, split-attribute
     sid_turns: list[tuple[float, float, str]] = []
     if _mean_db_file(mtg_wav) >= gate_db:
-        segs = [s for s in asr.transcribe(mtg_wav) if s.text.strip()]
+        asr_wav = _denoise(mtg_wav, workdir / "meeting_dn.wav") if denoise else mtg_wav
+        segs = [s for s in asr.transcribe(asr_wav) if s.text.strip()]
         if daemon is not None and gallery is not None and segs:
             try:
                 res = daemon.diarize(mtg_wav)
@@ -347,6 +415,8 @@ def run_capture(
     diarize: bool = True,
     threshold: float = 0.5,
     gate_db: float = -55.0,
+    bleed_reject_db: float = 6.0,
+    denoise: bool = False,
     operator_label: str = "You",
     on_turn: Callable[[Turn], None] | None = None,
     on_chunk: Callable[[int, int, float, bool], None] | None = None,
@@ -388,6 +458,7 @@ def run_capture(
     processed: set[int] = set()
     prev_sid_turns: list[tuple[float, float, str]] = []
     recent_emitted: list[Turn] = []  # previous window's turns, to dedup the shared seam
+    session_turns: list[Turn] = []  # every emitted turn, for the session record (IR)
     last_k = -2  # last window index emitted; -2 so window 0 reads as non-contiguous
 
     def _chunk_indices() -> list[int]:
@@ -400,7 +471,7 @@ def run_capture(
         return sorted(idx)
 
     def _process(k: int, *, terminal: bool = False) -> None:
-        nonlocal daemon, prev_sid_turns, recent_emitted, last_k
+        nonlocal daemon, prev_sid_turns, recent_emitted, session_turns, last_k
         if daemon is not None and not daemon.is_alive():
             say("  diarizer stopped — remaining audio → single 'Remote' speaker")
             daemon.close()
@@ -425,7 +496,8 @@ def run_capture(
             turns, sid_turns = _transcribe_window(
                 window_wav, win_start, emit_lo, emit_hi, profile, work,
                 daemon=daemon, gallery=gallery, prev_sid_turns=prev, shared_span=shared,
-                gate_db=gate_db, operator_label=operator_label, say=say,
+                gate_db=gate_db, operator_label=operator_label,
+                bleed_reject_db=bleed_reject_db, denoise=denoise, say=say,
             )
         except Exception as e:  # one bad window must not kill the whole session
             say(f"  window {k:05d}: skipped ({type(e).__name__}: {e})")
@@ -452,6 +524,7 @@ def run_capture(
                 say(f"  window {k:05d}: {len(written)} turns in {dt:.1f}s "
                     f"({'keeps up' if dt < segment_s else 'LAGS'} vs {segment_s}s)")
             recent_emitted = written
+            session_turns.extend(written)  # accumulate for the session record (IR)
             # sid_turns feeds the next window's temporal link; it is empty when this
             # window's meeting channel was silent or diarization failed, which forces
             # the next window onto the embedding fallback (known lag, ADR-0027)
@@ -517,5 +590,23 @@ def run_capture(
                 else:
                     _process(n, terminal=(pos == len(remaining) - 1))  # drain uses the daemon
             out.close()
+            # route the session through the Canonical IR: the record is the source of
+            # truth (schema-validated); the .md is re-rendered from it as a view (ADR-0028).
+            if session_turns:
+                try:
+                    ir = build_live_ir(
+                        [(t.start, t.end, t.speaker, t.text) for t in session_turns],
+                        profile,
+                        duration_s=max(t.end for t in session_turns),
+                        operator_label=operator_label,
+                        diarized=use_diar,
+                    )
+                    ir_path = out_path.parent / f"{out_path.stem}.ir.json"
+                    ir_path.write_text(json.dumps(ir, indent=2))
+                    out_path.write_text(render.to_markdown(ir))
+                    say(f"  session record → {ir_path.name} "
+                        f"({len(ir['turns'])} turns, {len(ir['speakers'])} speakers)")
+                except Exception as e:
+                    say(f"  (IR record failed, kept raw transcript: {e})")
         if daemon is not None:
             daemon.close()

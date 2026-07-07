@@ -83,6 +83,8 @@ def _cmd_capture(args: argparse.Namespace) -> int:
         segment_s=args.segment,
         diarize=not args.no_diarize,
         threshold=args.threshold,
+        bleed_reject_db=args.bleed_reject_db,
+        denoise=args.denoise,
         log=lambda m: print(m, file=sys.stderr),
     )
     return 0
@@ -178,6 +180,7 @@ class _LiveConsole:
 def _cmd_listen(args: argparse.Namespace) -> int:
     from datetime import datetime
 
+    from . import paths
     from .capture import Controls, run_capture
 
     try:
@@ -190,7 +193,12 @@ def _cmd_listen(args: argparse.Namespace) -> int:
         print(f"error: profile {profile.name!r} has no ASR stage", file=sys.stderr)
         return 2
 
-    out_path = Path(args.output) if args.output else Path(f"transcript-{datetime.now():%Y%m%d-%H%M%S}.md")
+    session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    if args.output:
+        out_path = Path(args.output)
+    else:  # default: a per-session pack dir under XDG data, scratch under XDG state
+        out_path = paths.ensure(paths.sessions_dir() / session_id) / "transcript.md"
+    workdir = paths.ensure(paths.capture_dir() / session_id)
     color = sys.stdout.isatty()
     console = _LiveConsole(fancy=color)
     controls = Controls()
@@ -242,11 +250,14 @@ def _cmd_listen(args: argparse.Namespace) -> int:
             segment_s=args.segment,
             diarize=not args.no_diarize,
             threshold=args.threshold,
+            bleed_reject_db=args.bleed_reject_db,
+            denoise=args.denoise,
             on_turn=on_turn,
             on_chunk=on_chunk,
             on_new_speaker=on_new_speaker,
             controls=controls,
             banner=False,
+            workdir=workdir,
             log=say,
         )
     except KeyboardInterrupt:
@@ -259,6 +270,99 @@ def _cmd_listen(args: argparse.Namespace) -> int:
 
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_termios)
     say(f"saved → {out_path}")
+    return 0
+
+
+# A phonetically rich passage (the Rainbow Passage) — reading it gives a fuller,
+# more speaker-representative voiceprint than a few offhand words.
+_ENROLL_PASSAGE = (
+    "When the sunlight strikes raindrops in the air, they act as a prism and form a "
+    "rainbow. The rainbow is a division of white light into many beautiful colors. "
+    "These take the shape of a long round arch, with its path high above, and its two "
+    "ends apparently beyond the horizon."
+)
+
+
+def _dominant_embedding(res: dict) -> list[float] | None:
+    """Embedding of the speaker with the most speech in a diarize result (the reader)."""
+    dur: dict[str, float] = {}
+    for t in res.get("turns", []):
+        dur[t["label"]] = dur.get(t["label"], 0.0) + (t["end"] - t["start"])
+    emb = {s["label"]: s["embedding"] for s in res.get("speakers", []) if s.get("embedding")}
+    ranked = sorted((lbl for lbl in emb if lbl in dur), key=lambda lbl: dur[lbl], reverse=True)
+    if ranked:
+        return emb[ranked[0]]
+    return next(iter(emb.values()), None)  # short clip with no turns → any usable one
+
+
+def _cmd_enroll(args: argparse.Namespace) -> int:
+    import subprocess
+
+    from . import library, paths
+    from .capture import detect_paths
+    from .diarizer_daemon import DiarizerDaemon
+    from .session_gallery import cosine
+
+    try:
+        profile = profiles.load(profiles.resolve(args.profile))
+    except profiles.ProfileError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if not profile.diar.enabled:
+        print(f"error: profile {profile.name!r} has no diarizer to compute embeddings", file=sys.stderr)
+        return 2
+    mic = args.mic or detect_paths(args.app).mic
+
+    prior = library.find_by_name(args.name)
+    where = f"updating existing, {prior.samples} sample(s)" if prior else "new"
+    print(f"\nEnrolling a voiceprint for {args.name!r} ({where}).")
+    print("\nRead the following aloud, clearly and at a normal pace:\n")
+    body = f"\033[36m{_ENROLL_PASSAGE}\033[0m" if sys.stdout.isatty() else _ENROLL_PASSAGE
+    print(f"  {body}\n")
+    try:
+        input(f"Press Enter when ready — recording runs for {args.seconds}s… ")
+    except (EOFError, KeyboardInterrupt):
+        print("\ncancelled.", file=sys.stderr)
+        return 1
+    print("● recording — read now…", flush=True)
+
+    work = paths.ensure(paths.state_dir() / "enroll")
+    wav = work / "enroll.wav"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "pulse", "-i", mic,
+         "-t", str(args.seconds), "-ar", "16000", "-ac", "1", str(wav)],
+        check=True,
+    )
+    print("✓ captured — computing voiceprint…")
+    daemon = DiarizerDaemon(profile.diar.model, work)
+    daemon.start()
+    try:
+        res = daemon.diarize(wav)
+    finally:
+        daemon.close()
+
+    emb = _dominant_embedding(res)
+    if emb is None:
+        print("error: no usable voice captured (too quiet or no speech). Try again.", file=sys.stderr)
+        return 2
+    if prior is not None:
+        sim = cosine(emb, prior.centroid)
+        print(f"  match to your existing print: cosine {sim:.3f}  (1.0 = identical, >0.5 = same voice)")
+    vp = library.enroll(args.name, emb)
+    print(f"\n✓ enrolled {vp.name!r} — uid {vp.uid}, {vp.samples} sample(s) → {paths.library_dir()}\n")
+    return 0
+
+
+def _cmd_library(args: argparse.Namespace) -> int:
+    from . import library
+
+    vps = library.load_all()
+    if not vps:
+        print("(no voiceprints enrolled — run: transcribbler enroll --name <name>)")
+        return 0
+    print(f"{'uid':14}{'name':20}{'samples':>8}  updated")
+    for vp in vps:
+        print(f"{vp.uid:14}{vp.name:20}{vp.samples:>8}  {vp.updated}")
     return 0
 
 
@@ -329,12 +433,25 @@ def main(argv: list[str] | None = None) -> int:
         "--threshold", type=float, default=0.5,
         help="voiceprint cosine match threshold for session-stable speakers (default: 0.5)",
     )
+    c.add_argument(
+        "--bleed-reject-db", type=float, default=6.0,
+        help="reject a mic segment as speaker bleed when the meeting channel is louder than the "
+             "mic by more than this many dB over its span (default: 6.0; 120 effectively disables)",
+    )
+    c.add_argument(
+        "--denoise", action="store_true",
+        help="spectral-denoise the meeting channel before ASR (experimental; may not help)",
+    )
     c.set_defaults(func=_cmd_capture)
 
     ls = sub.add_parser(
         "listen", help="live console: transcribe what's playing, print it live, [space]/[q] controls"
     )
-    ls.add_argument("-o", "--output", help="transcript file (default: transcript-YYYYMMDD-HHMMSS.md)")
+    ls.add_argument(
+        "-o", "--output",
+        help="transcript file (default: a per-session pack under XDG data, "
+             "e.g. ~/.local/share/transcribbler/sessions/<id>/transcript.md)",
+    )
     ls.add_argument("-p", "--profile", help="compute profile (auto-selected if omitted)")
     ls.add_argument("--app", default="Google Chrome", help="meeting app to match for path detection")
     ls.add_argument("--mic", help="override: PipeWire source for the operator mic")
@@ -344,7 +461,28 @@ def main(argv: list[str] | None = None) -> int:
     ls.add_argument(
         "--threshold", type=float, default=0.5, help="voiceprint match threshold (default: 0.5)"
     )
+    ls.add_argument(
+        "--bleed-reject-db", type=float, default=6.0,
+        help="reject a mic segment as speaker bleed when the meeting channel is louder than the "
+             "mic by more than this many dB over its span (default: 6.0; raise to reject less, "
+             "120 effectively disables)",
+    )
+    ls.add_argument(
+        "--denoise", action="store_true",
+        help="spectral-denoise the meeting channel before ASR (experimental; may not help)",
+    )
     ls.set_defaults(func=_cmd_listen)
+
+    e = sub.add_parser("enroll", help="record a read-aloud sample → build/update a named voiceprint")
+    e.add_argument("--name", required=True, help="speaker name for the voiceprint")
+    e.add_argument("--seconds", type=int, default=30, help="recording length (default: 30)")
+    e.add_argument("--mic", help="override: PipeWire source to record from")
+    e.add_argument("--app", default="Google Chrome", help="app to match for mic path detection")
+    e.add_argument("-p", "--profile", help="compute profile (auto-selected if omitted)")
+    e.set_defaults(func=_cmd_enroll)
+
+    lib = sub.add_parser("library", help="list enrolled voiceprints")
+    lib.set_defaults(func=_cmd_library)
 
     r = sub.add_parser("render", help="render an existing Canonical IR to md/vtt/json")
     r.add_argument("ir", help="path to a Canonical IR .json")

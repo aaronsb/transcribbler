@@ -43,3 +43,8 @@ secrets/
 *.swp
 .idea/
 .vscode/
+
+# legacy live-capture output written to CWD (pre-XDG); new runs go to XDG data/state
+transcript-*.md
+.transcript-*.capture/
+*.ir.json
