@@ -33,7 +33,7 @@ from pathlib import Path
 
 from . import frontmatter, library, paths, render
 
-SPEC_VERSION = "0.1"
+SPEC_VERSION = library.SPEC_VERSION  # single source (library can't import pack; pack imports it)
 
 
 def new_uid() -> str:

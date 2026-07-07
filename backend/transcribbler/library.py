@@ -13,6 +13,8 @@ audio clips yet — just the vector, a name, and provenance, enough to enroll an
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -70,15 +72,22 @@ def _load_md(uid: str) -> Voiceprint | None:
     md, vec = _md_path(uid), _vec_path(uid)
     if not md.exists() or not vec.exists():  # a record without its vector is incomplete
         return None
-    m = frontmatter.parse(md.read_text())
-    return Voiceprint(
-        uid=m.get("uid", uid),
-        name=m.get("name", ""),
-        centroid=json.loads(vec.read_text()),
-        samples=int(m.get("samples", 1)),
-        updated=m.get("updated", ""),
-        sources=list(m.get("sources") or []),
-    )
+    try:  # a corrupt record must be SKIPPED (return None), never crash load_all/best_match
+        m = frontmatter.parse(md.read_text())
+        centroid = json.loads(vec.read_text())
+        sources = m.get("sources") or []
+        if isinstance(sources, str):  # a hand-edited scalar, not a sequence — wrap, don't splat
+            sources = [sources]
+        return Voiceprint(
+            uid=m.get("uid", uid),
+            name=m.get("name", ""),
+            centroid=centroid,
+            samples=int(m.get("samples", 1)),
+            updated=m.get("updated", ""),
+            sources=list(sources),
+        )
+    except (ValueError, TypeError, OSError):
+        return None
 
 
 def _load_legacy(uid: str) -> Voiceprint | None:
@@ -100,15 +109,17 @@ def load_all() -> list[Voiceprint]:
     if not d.exists():
         return []
     out: dict[str, Voiceprint] = {}
+    loaded: set[str] = set()  # stems whose .md record actually LOADED (not merely exists)
     for p in sorted(d.glob("*.md")):
         vp = _load_md(p.stem)
         if vp is not None:
             out[vp.uid] = vp
+            loaded.add(p.stem)
     for p in sorted(d.glob("*.json")):
         if p.name.endswith(".vec.json"):
             continue  # a sibling vector, not a record
-        if (d / f"{p.stem}.md").exists():
-            continue  # already migrated to md — that copy wins
+        if p.stem in loaded:
+            continue  # a complete md copy loaded and wins; an INCOMPLETE md never shadows legacy
         vp = _load_legacy(p.stem)
         if vp is not None:
             out.setdefault(vp.uid, vp)
@@ -122,11 +133,27 @@ def find_by_name(name: str) -> Voiceprint | None:
     return None
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via a temp file + rename so a reader never sees a half-written record."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def save(vp: Voiceprint) -> None:
     paths.ensure(paths.library_dir())
-    _md_path(vp.uid).write_text(frontmatter.emit(_meta(vp)) + f"\n# {vp.name}\n")
-    _vec_path(vp.uid).write_text(json.dumps(vp.centroid))
-    _legacy_path(vp.uid).unlink(missing_ok=True)  # migrate off the old JSON record
+    # Order matters for crash-safety: the vector lands first, then the .md (the "record exists"
+    # signal, so it never appears without its vector), then the legacy .json is dropped last — so
+    # every interrupted state is recoverable (vector-only → legacy still loads; complete md → md
+    # wins over legacy). Each write is atomic (temp + rename), so no torn file is ever read.
+    _atomic_write(_vec_path(vp.uid), json.dumps(vp.centroid))
+    _atomic_write(_md_path(vp.uid), frontmatter.emit(_meta(vp)) + f"\n# {vp.name}\n")
+    _legacy_path(vp.uid).unlink(missing_ok=True)
 
 
 def _fold(centroid: list[float], count: int, emb: list[float]) -> list[float]:

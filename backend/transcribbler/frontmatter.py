@@ -10,20 +10,23 @@ YAML implementation, and only needs to read documents this module produced.
 
 from __future__ import annotations
 
+import json
+
 
 def _scalar(value: object) -> str:
     """Render one scalar, preserving its YAML type.
 
-    Ints/bools emit bare; everything else is double-quoted (``"``/``\\`` escaped) so a reader sees
-    the intended *string* — otherwise ``id: 203346`` parses as an int, ``spec_version: 0.1`` as a
-    float, ``timestamp: …Z`` as a date, and a value containing ``:`` or a leading ``#`` breaks.
+    Ints/bools emit bare; every other value is emitted as a **JSON string** — which is a valid
+    YAML double-quoted scalar — so a reader sees the intended *string* (``id: 203346`` stays a
+    string, not an int; ``spec_version: 0.1`` not a float; ``timestamp: …Z`` not a date) and *all*
+    special characters are escaped, including quotes, backslashes, and newlines (a raw newline
+    would otherwise split the value across physical lines and break the round-trip).
     """
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
-    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+    return json.dumps(str(value))
 
 
 def emit(meta: dict) -> str:
@@ -48,22 +51,12 @@ def emit(meta: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _unquote(token: str) -> str:
-    out: list[str] = []
-    i = 0
-    while i < len(token):
-        if token[i] == "\\" and i + 1 < len(token):
-            out.append(token[i + 1])
-            i += 2
-        else:
-            out.append(token[i])
-            i += 1
-    return "".join(out)
-
-
 def _unscalar(token: str) -> object:
     if len(token) >= 2 and token[0] == '"' and token[-1] == '"':
-        return _unquote(token[1:-1])
+        try:
+            return json.loads(token)  # inverse of _scalar's json.dumps
+        except json.JSONDecodeError:
+            return token[1:-1]  # tolerate a hand-edited/damaged quoted value
     if token in ("true", "false"):
         return token == "true"
     try:
@@ -83,10 +76,14 @@ def parse(text: str) -> dict:
     if not lines or lines[0].strip() != "---":
         return {}
     block: list[str] = []
+    closed = False
     for line in lines[1:]:
         if line.strip() == "---":
+            closed = True
             break
         block.append(line)
+    if not closed:  # no closing fence → not a real frontmatter block; don't parse the body
+        return {}
 
     meta: dict = {}
     i = 0

@@ -33,8 +33,22 @@ def test_ignores_markdown_body_after_the_fence():
     assert frontmatter.parse(text) == {"name": "Priya"}
 
 
+def test_round_trips_newlines_and_control_chars():
+    # a value with a newline must not split across physical lines (review finding #2)
+    meta = {"name": "Foo\nBar", "note": "tab\there"}
+    emitted = frontmatter.emit(meta)
+    assert frontmatter.parse(emitted) == meta
+    assert len(emitted.splitlines()) == 4  # ---, name:, note:, --- — no split across lines
+
+
 def test_no_frontmatter_returns_empty():
     assert frontmatter.parse("# just a heading\n\nbody\n") == {}
+
+
+def test_missing_closing_fence_does_not_parse_body():
+    # a truncated doc (no closing ---) must not treat body lines as frontmatter (finding #5)
+    text = "---\nname: \"Priya\"\n\n# Priya\n\nkey: value looking line\n"
+    assert frontmatter.parse(text) == {}
 
 
 def test_none_values_are_dropped():

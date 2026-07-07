@@ -71,6 +71,41 @@ def test_reads_and_migrates_a_legacy_json_record(tmp_path, monkeypatch):
     assert len(library.load_all()) == 1  # migrated, not duplicated across formats
 
 
+def test_corrupt_record_is_skipped_not_crash(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    library.enroll("Good", E1, uid="good")
+    # a truncated sibling vector must not take down the whole library (review finding #1)
+    (paths.library_dir() / "bad.md").write_text(
+        frontmatter.emit({"uid": "bad", "type": "voiceprint", "name": "Bad", "samples": 1})
+    )
+    (paths.library_dir() / "bad.vec.json").write_text("[1.0, 0.0,")  # truncated JSON
+    names = {vp.name for vp in library.load_all()}  # must not raise
+    assert names == {"Good"}  # the good record survives; the corrupt one is skipped
+
+
+def test_incomplete_md_does_not_shadow_legacy(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    lib = paths.ensure(paths.library_dir())
+    # simulate a crashed migration: a .md exists WITHOUT its .vec, and the legacy .json survives
+    (lib / "olduid.json").write_text(json.dumps(
+        {"uid": "olduid", "name": "Legacy", "centroid": E1, "samples": 3, "updated": "x"}
+    ))
+    (lib / "olduid.md").write_text(frontmatter.emit({"uid": "olduid", "name": "Legacy"}))
+    vps = library.load_all()  # incomplete md must not hide the still-valid legacy record
+    assert [vp.name for vp in vps] == ["Legacy"] and vps[0].samples == 3
+
+
+def test_scalar_sources_is_wrapped_not_splatted(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    lib = paths.ensure(paths.library_dir())
+    (lib / "u.md").write_text(frontmatter.emit(
+        {"uid": "u", "name": "N", "samples": 1, "sources": "../s/x.tar.gz"}  # scalar, not a list
+    ))
+    (lib / "u.vec.json").write_text(json.dumps(E1))
+    vp = library.load("u")
+    assert vp.sources == ["../s/x.tar.gz"]  # not ['.', '.', '/', 's', ...] (finding #6)
+
+
 def test_best_match_picks_nearest_over_threshold(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     library.enroll("Aaron", E1)
