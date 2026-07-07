@@ -87,6 +87,114 @@ def _cmd_capture(args: argparse.Namespace) -> int:
     return 0
 
 
+_SPK_PALETTE = ["36", "35", "33", "34", "32", "31"]  # cyan, magenta, yellow, blue, green, red
+
+
+def _speaker_color(label: str) -> str:
+    if label == "You":
+        return "1;32"  # bold green — the operator
+    if label == "Remote":
+        return "2"  # dim — unattributed remote
+    if label.startswith("S") and label[1:].isdigit():
+        return _SPK_PALETTE[(int(label[1:]) - 1) % len(_SPK_PALETTE)]
+    return "0"
+
+
+def _fmt_turn(turn, color: bool) -> str:
+    m, s = divmod(int(turn.start), 60)
+    ts = f"{m:02d}:{s:02d}"
+    if not color:
+        return f"[{ts}] {turn.speaker}: {turn.text}"
+    return f"\033[2m[{ts}]\033[0m \033[{_speaker_color(turn.speaker)}m{turn.speaker}\033[0m: {turn.text}"
+
+
+def _key_listener(controls, say) -> None:
+    """Single-key controls: space toggles pause, q quits. Caller sets cbreak mode."""
+    import select
+
+    while not controls.stopped:
+        r, _, _ = select.select([sys.stdin], [], [], 0.2)
+        if not r:
+            continue
+        try:
+            ch = sys.stdin.read(1)
+        except (OSError, ValueError):
+            break
+        if ch == " ":
+            controls.toggle_pause()
+            say("  ⏸  paused (listening off)" if controls.paused else "  ▶  resumed")
+        elif ch in ("q", "Q"):
+            say("  quitting…")
+            controls.stop()
+            break
+
+
+def _cmd_listen(args: argparse.Namespace) -> int:
+    import threading
+    from datetime import datetime
+
+    from .capture import Controls, run_capture
+
+    try:
+        profile_path = profiles.resolve(args.profile)
+    except profiles.ProfileError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    profile = profiles.load(profile_path)
+    if not profile.asr.enabled:
+        print(f"error: profile {profile.name!r} has no ASR stage", file=sys.stderr)
+        return 2
+
+    out_path = Path(args.output) if args.output else Path(f"transcript-{datetime.now():%Y%m%d-%H%M%S}.md")
+    color = sys.stdout.isatty()
+    controls = Controls()
+
+    def say(m: str) -> None:
+        print(m, file=sys.stderr, flush=True)
+
+    def on_turn(turn) -> None:
+        print(_fmt_turn(turn, color), flush=True)  # transcript → stdout; status → stderr
+
+    # Single-key controls only when stdin is a real terminal; otherwise run to Ctrl-C.
+    old_termios = None
+    if sys.stdin.isatty():
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old_termios = termios.tcgetattr(fd)
+        tty.setcbreak(fd)  # ISIG stays on → Ctrl-C still works
+        threading.Thread(target=_key_listener, args=(controls, say), daemon=True).start()
+        say(f"listening → {out_path}    [space] pause/resume    [q] quit")
+    else:
+        say(f"listening → {out_path}    (Ctrl-C to stop)")
+
+    try:
+        run_capture(
+            profile,
+            out_path,
+            app=args.app,
+            mic=args.mic,
+            meeting=args.meeting,
+            segment_s=args.segment,
+            diarize=not args.no_diarize,
+            threshold=args.threshold,
+            on_turn=on_turn,
+            controls=controls,
+            log=say,
+        )
+    except KeyboardInterrupt:
+        pass
+    finally:
+        controls.stop()
+        if old_termios is not None:
+            import termios
+
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_termios)
+    say(f"saved → {out_path}")
+    return 0
+
+
 def _cmd_render(args: argparse.Namespace) -> int:
     path = Path(args.ir)
     if not path.exists():
@@ -155,6 +263,21 @@ def main(argv: list[str] | None = None) -> int:
         help="voiceprint cosine match threshold for session-stable speakers (default: 0.5)",
     )
     c.set_defaults(func=_cmd_capture)
+
+    ls = sub.add_parser(
+        "listen", help="live console: transcribe what's playing, print it live, [space]/[q] controls"
+    )
+    ls.add_argument("-o", "--output", help="transcript file (default: transcript-YYYYMMDD-HHMMSS.md)")
+    ls.add_argument("-p", "--profile", help="compute profile (auto-selected if omitted)")
+    ls.add_argument("--app", default="Google Chrome", help="meeting app to match for path detection")
+    ls.add_argument("--mic", help="override: PipeWire source for the operator mic")
+    ls.add_argument("--meeting", help="override: PipeWire monitor source for meeting audio")
+    ls.add_argument("--segment", type=int, default=20, help="chunk length in seconds (default: 20)")
+    ls.add_argument("--no-diarize", action="store_true", help="skip remote-speaker diarization")
+    ls.add_argument(
+        "--threshold", type=float, default=0.5, help="voiceprint match threshold (default: 0.5)"
+    )
+    ls.set_defaults(func=_cmd_listen)
 
     r = sub.add_parser("render", help="render an existing Canonical IR to md/vtt/json")
     r.add_argument("ir", help="path to a Canonical IR .json")
