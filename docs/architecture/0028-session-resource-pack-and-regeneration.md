@@ -1,164 +1,171 @@
-# ADR-0028: Session resource-pack & regeneration lifecycle — the structured record is the source of truth, transcripts are renders
+# ADR-0028: The session pack — one open, self-describing unit of persistence, with two-tier regeneration and universal voiceprint extraction
 
-- **Status**: Draft (pre-build sketch)
+- **Status**: Proposed
 - **Date**: 2026-07-07
 - **Deciders**: Aaron
-
-> **Note (build-first):** this is a design sketch to guide a spike, not a settled decision.
-> We don't yet know the real shape of live-capture-through-the-IR, the pack boundary, or the
-> retention/finalize mechanics until we build them. This ADR will be rewritten to match what
-> the spike actually teaches us, then moved to Proposed. Forward references to ADR-0029/0030
-> are placeholders for consumers not yet written.
 
 ## Context
 
 The batch pipeline already treats a **structured record as authoritative and human-readable
 transcripts as views over it**: `transcribe` runs `run_pipeline` → a schema-validated
 **Canonical IR** ([ADR-0006](0006-canonical-ir-contract.md)), and `render(ir, fmt)` derives
-`md`/`vtt`/`json` from it — `render.py` states it outright ("the IR is the source of truth;
-renderers are pure views"). The **live** path does not. `capture.py` writes markdown lines
-straight to disk (`out.write(f"[{ts}] {speaker}: {text}")`), never building an IR, and its
-`_process` finally-block **unlinks every audio chunk after transcribing it** (plus backlog-drop
-and terminal-drain deletes). The sole surviving artifact is a flat transcript, and the substrate
-is destroyed — exactly what [ADR-0027](0027-robust-online-speaker-attribution.md) noted when it
-observed "chunks are unlinked and unlinkable after processing," so a meeting cannot be replayed.
+`md`/`vtt`/`json` from it (`render.py`: "the IR is the source of truth; renderers are pure
+views"). The system's identity layer is designed to **compound** — [ADR-0024](0024-live-speaker-identification.md)
+makes speaker identity provisional-then-refined and every naming/merge/split reversible, and
+[ADR-0027](0027-robust-online-speaker-attribution.md) defers authoritative attribution to an
+offline reconciliation pass. For that compounding to reach *back* into past sessions, each
+session must persist something re-labelable and re-processable, under one boundary that can be
+moved, sealed, replicated, and expired.
 
-This is the wrong outcome for a system whose identity layer is designed to **compound**:
-[ADR-0024](0024-live-speaker-identification.md) makes speaker identity provisional-then-refined
-and every naming/merge/split reversible, and [ADR-0027](0027-robust-online-speaker-attribution.md)
-explicitly defers the authoritative attribution to an offline reconciliation pass. If the live
-path keeps only rendered markdown and throws the audio away, none of that refinement can reach a
-transcript already written — a person named or a merge corrected next month cannot improve last
-month's meeting, because the meeting kept no re-labelable structure and no re-processable audio.
+*(Motivating example: this crystallized in live use, where the same speaker fragmented across
+audio conditions and the live path kept only lossy markdown — a transcript that could neither be
+re-labeled nor re-processed once the audio was gone. The decision below is the durable principle,
+not that episode.)*
 
 The forces:
 
-- **Refinement must be able to reach back.** Attribution improves over time; the transcript that
-  was produced when identity was worst is the one that most needs the later, better identity.
-- **Two different costs of "regenerate."** Re-styling a transcript (md ↔ srt ↔ speaker-grouped)
-  is a pure function of the record. Re-deriving the record itself (better ASR/diarization/
-  attribution) needs the *audio* back. Collapsing these into one word hides that one is free and
-  the other is expensive and only sometimes possible.
-- **Audio is the most sensitive artifact and the scarcest to keep.** Retaining listenable
-  third-party voice — even compressed — is precisely the biometric-consent case
-  [ADR-0013](0013-retention-and-consent.md) defers and [ADR-0024](0024-live-speaker-identification.md)
-  flags as load-bearing. Retention is therefore a *bounded* privilege, not a default.
-- **A session's artifacts are currently scattered** (a markdown file here, gallery writes there,
-  clips deleted) with no single unit to move, encrypt, replicate, or expire — which the locality
-  and replication decisions ([ADR-0025](0025-deployment-topology-and-data-locality.md),
-  [ADR-0026](0026-shared-speaker-identity-store.md)) assume exists.
+- **Refinement must reach back.** Attribution improves over time; the transcript produced when
+  identity was worst is the one that most needs the later, better identity.
+- **"Regenerate" hides two very different costs.** Re-styling a transcript (md ↔ srt ↔
+  speaker-grouped) is a pure function of the record. Re-deriving the record itself (better
+  ASR/diarization/attribution) needs the *audio* back. One word conflates the free operation with
+  the expensive, sometimes-impossible one.
+- **Audio is the most sensitive and scarcest artifact to keep.** Retaining listenable third-party
+  voice — even compressed — is the biometric-consent case [ADR-0013](0013-retention-and-consent.md)
+  defers and [ADR-0024](0024-live-speaker-identification.md) flags as load-bearing. Retention is a
+  *bounded* privilege, not a default.
+- **Enrollment and conversation are not different mechanisms.** Both are "capture a person's voice
+  and keep the substrate." Treating them as two subsystems (a session store *and* a read-aloud
+  enroll path) duplicates storage, extraction, and consent handling for one underlying thing.
+- **A session's artifacts are currently scattered** (a markdown file, gallery writebacks, deleted
+  clips) with no single unit for the locality and replication overlays
+  ([ADR-0025](0025-deployment-topology-and-data-locality.md),
+  [ADR-0026](0026-shared-speaker-identity-store.md)) to act on.
 
 ## Decision
 
-A **per-session resource pack is the unit of persistence**, its **structured record is the
-Canonical IR extended**, and **regeneration has two tiers** gated by whether audio is still
-retained. This is a **draft / debate** artifact: each decision lays out the fork and lands a
-recommendation, for review before commit.
+**The session pack is the one unit of persistence in transcribbler.** It is an open,
+self-describing bundle of files whose structured record is the Canonical IR extended; every
+capture produces one; regeneration has two tiers gated by whether audio is still retained; and
+voiceprint extraction is a single operation defined over any pack. The concrete on-disk contract
+(naming grammar, frontmatter schema, tar layout, extraction signature) is the
+**[session-pack format spec](../specs/session-pack.md)**; this ADR decides the model, the spec
+carries the shape.
 
-### Decision 1 — the structured record is the source of truth; transcripts are renders
+### 1 — One kind of artifact for every capture
 
-The session's authoritative artifact is a **structured record**, and it is the **Canonical IR
-([ADR-0006](0006-canonical-ir-contract.md)), extended** — *not* a new parallel format. The batch
-path already does this; live capture is brought onto the same contract instead of writing
-markdown directly. `.md`/`.srt`/`.vtt`/speaker-grouped/etc. are **generated views** produced by
-`render`, never stored as the truth.
+Every capture — a conversation *or* an enrollment — produces the **same kind of artifact: a
+session pack.** An enrollment is not a special mechanism; it is a session pack that happens to
+contain a single speaker, tagged for training. This collapses what would otherwise be two stores
+into one: the same persistence, extraction, finalize, and consent machinery serves both, and a
+conversation and a deliberate voice sample differ only in their contents and tags, not in kind.
 
-The extension carries what live attribution needs and the batch IR does not yet hold: per-turn
-**speaker UID + confidence**, per-segment **embedding references** (into the evidence store, not
-inline biometrics — [ADR-0024](0024-live-speaker-identification.md)), and session-scoped
-**timing/provenance**. This is the concrete instance of the epoch/session identity that
-[ADR-0014](0014-ir-epoch-session-identity.md) deferred until a live session actually needed it;
-the record makes a live session a first-class Canonical IR document.
+### 2 — A pack is OKF-aligned "just files" that survive their tooling
 
-Retroactive refinement — **relabel / merge / split** — edits the *record*, then re-renders. This
-composes directly with [ADR-0024](0024-live-speaker-identification.md)'s UID/label split: turns
-reference opaque **UIDs**, names are mutable labels resolved at render time, so naming, merging,
-and splitting **never rewrite turn references** — they update the speaker table and the record's
-UID bindings, and every view regenerates cleanly. Correcting a meeting's identities is a cheap
-edit-plus-re-render, not a re-transcription.
+A pack is modeled on the **Open Knowledge Format** (Google Cloud,
+[how the OKF can improve data sharing](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing)) —
+knowledge as portable files, not rows in a proprietary store. Three OKF principles are adopted
+directly:
 
-- **1a — keep the live path writing markdown directly (status quo).** *Reject.* It is the root of
-  the problem: the only artifact is a lossy view, unre-labelable and unre-renderable.
-- **1b — invent a live-specific session format alongside the IR.** *Reject.* Two source-of-truth
-  formats to schema, version, render, and reconcile, for no gain — the IR's `speakers[]` /
-  `turns[]` shape already fits, needing only additive fields (the same additive discipline
-  [ADR-0023](0023-voiceprint-lifecycle.md) used for `source:"enrolled"`).
-- **1c — the record IS the extended Canonical IR; live capture routes through it (RECOMMEND).**
-  One contract, one renderer, one schema-versioning story; batch and live converge; refinement is
-  an IR edit. **Recommendation: 1c.**
+- **Minimally opinionated.** Only a tiny required metadata core is fixed; producers extend the
+  frontmatter and the bundle freely without a schema migration.
+- **Producer/consumer independence.** The format *is* the contract. Capture (the producer) and
+  rendering, extraction, and adjudication (the consumers) evolve and swap independently — nothing
+  reaches across the format to a shared runtime.
+- **Format, not platform.** A pack opens with `tar` plus stdlib parsers; no transcribbler process
+  is required to read one. The value lives in the files, so it outlives any version of the tool.
 
-### Decision 2 — the session pack is one portable container
+And OKF's **reference-as-graph** idea: small human-readable documents carry typed references to
+each other and to their heavier resources, forming a browsable graph rather than an opaque
+database (see decisions 6 and 7).
 
-A session persists as **one pack** (a single tar.gz / object), bundling:
+### 3 — The record is the extended Canonical IR; transcripts are renders
 
-- the **structured record** (the extended IR of Decision 1);
-- the session's **per-speaker voiceprint embeddings** (the refinement written back per
-  [ADR-0024](0024-live-speaker-identification.md));
-- **compressed, speaker-isolated audio clips** (Decision 4) — the re-process substrate;
-- **session metadata** — participant count, reconciliation answers
-  ([ADR-0030](0030-reconciliation-questionnaire.md), consumer), and quality/discrimination
-  metrics.
+The pack's authoritative artifact is a **structured record**, and it is the **Canonical IR
+([ADR-0006](0006-canonical-ir-contract.md)), extended** — not a new parallel format. Live capture
+is brought onto the same contract the batch path already uses; `.md`/`.srt`/`.vtt`/speaker-grouped
+outputs are **generated views** produced by `render`, never stored as truth. The extension carries
+what live attribution needs and the batch IR does not yet hold: per-turn speaker **UID +
+confidence**, per-segment **embedding references** (into the evidence store, not inline
+biometrics — [ADR-0024](0024-live-speaker-identification.md)), and session-scoped
+**timing/provenance** — the concrete instance of the epoch/session identity
+[ADR-0014](0014-ir-epoch-session-identity.md) deferred. Retroactive **relabel / merge / split**
+edits the *record*, then re-renders; because turns reference opaque UIDs and names resolve at
+render time, identity operations never rewrite turn references.
 
-One pack is **one thing to move, seal, replicate, or expire.** It is the natural
-**replication/reconciliation unit** for [ADR-0026](0026-shared-speaker-identity-store.md) and
-slots into [ADR-0025](0025-deployment-topology-and-data-locality.md)'s per-artifact locality
-overlay wholesale (the record and embeddings may travel within the trust domain; the clips are
-the pinned-most artifact). The alternative — leaving artifacts scattered across a markdown file,
-gallery writebacks, and a clip store with no common boundary — is what makes locality, encryption,
-and expiry each an ad-hoc per-artifact chore; the pack gives them one seam.
+### 4 — Two loose artifacts plus a self-describing blob
 
-### Decision 3 — two-tier regeneration
+A pack surfaces as **two loose files** plus one archive that can stand alone:
 
-- **(a) Re-render — cheap, always available.** A pure function of the structured record → any
-  transcript style. Needs no audio; available for the pack's whole life, including after finalize.
-  This is `render` generalized: relabel/merge/split then re-render is the everyday refinement loop.
-- **(b) Re-process — expensive, audio-gated.** Re-run ASR / diarization / attribution over the
-  **retained audio** with an improved corpus/models to regenerate **the record itself** — better
-  text *and* better attribution, not just a restyle. This is how a maturing gallery
-  ([ADR-0024](0024-live-speaker-identification.md)) actually reaches an old meeting, and it is the
-  offline-reconciliation pass of [ADR-0027](0027-robust-online-speaker-attribution.md) made
-  repeatable rather than one-shot. **Re-process is available only while the pack retains audio**
-  (Decision 5). Once audio is stripped, only re-render remains.
+- a human-friendly **`.md`** — YAML frontmatter plus the rendered transcript — whose frontmatter
+  *references* the archive (the OKF `resource:` pattern);
+- a verbose-named **`.tar.gz` blob** holding the record, the compressed audio, and metadata.
 
-The two tiers are why the substrate matters: without retained audio the system can restyle a
-transcript forever but can never *improve* it beyond a re-labeling of what the first pass heard.
+The blob **always packs a copy of the `.md` at creation.** A pack is therefore self-describing:
+lose the loose sidecar ("I deleted my `.md` files") and the embedded copy is authoritative. The
+loose `.md` is a convenience view over a bundle that already contains everything needed to rebuild
+it.
 
-### Decision 4 — retain compressed audio, not raw WAV
+### 5 — Two-tier regeneration, gated by retained audio
 
-Retain the re-process substrate as **compressed, speaker-isolated clips**, **not raw WAV**. The
-one decision that matters is *compressed vs lossless*: raw WAV is ~10× the size for fidelity the
-downstream ASR/diarization models do not consume, so it is not worth keeping at rest.[^codec]
-Default to an **opus-class** codec; the **pack format keeps the codec swappable behind it** (the
-record references clips by role/UID + offset, not by codec), so the exact codec is an
-implementation detail, not an architectural fork. Clips are speaker-isolated so they double as the
+- **Re-render — cheap, always available.** A pure function of the record → any transcript style.
+  Needs no audio; available for the pack's whole life, including after finalize. Relabel/merge/split
+  then re-render is the everyday refinement loop.
+- **Re-process — expensive, audio-gated.** Re-run ASR / diarization / attribution over the
+  **retained audio** with improved models/corpus to regenerate **the record itself** — better text
+  *and* better attribution. This is [ADR-0027](0027-robust-online-speaker-attribution.md)'s offline
+  reconciliation made repeatable, and how a maturing gallery reaches an old session. Available only
+  while the pack retains audio (decision 8). Once audio is stripped, only re-render remains.
+
+Audio is retained as **compressed, speaker-isolated clips, not raw WAV**: raw WAV is ~10× the size
+for fidelity the ASR/diarization models do not consume.[^codec] Default to an **opus-class** codec;
+the record references clips by role/UID + offset, so the codec stays swappable behind the format
+and is an implementation detail, not an architectural fork. Speaker-isolated clips double as the
 [ADR-0024](0024-live-speaker-identification.md) audition/adjudication exemplars, joined by UID.
 
-[^codec]: Sizes: lossless WAV ≈ 115 MB/hr; opus-class ≈ 10 MB/hr. The contrast justifies "not raw
-WAV"; it is not a codec-selection deliberation.
+[^codec]: Sizes: lossless WAV ≈ 115 MB/hr; opus-class ≈ 10 MB/hr — the contrast justifies "not raw
+WAV," it is not a codec-selection deliberation.
 
-### Decision 5 — the finalize lifecycle: active → finalized
+### 6 — Universal voiceprint extraction
 
-A pack has two states, and **finalize is the privacy/storage transition**:
+**Extraction is one operation, defined over any pack** — introspect the pack's audio → per-speaker
+embeddings → the voiceprint library — regardless of whether the pack is a conversation or an
+enrollment. This is what makes decision 1 pay off: there is a single extraction interface, not one
+per capture kind. *Any* pack can improve a voiceprint incidentally; an **enrollment pack is
+purpose-built ideal training data** — a single speaker, clean, controlled — but it feeds the very
+same extraction. The store can therefore batch-re-extract by tag ("re-extract from all `meeting`
+packs with the new model").
 
-- **active** — audio retained → **both** regeneration tiers (re-render *and* re-process).
-- **finalized** — audio **stripped** → **re-render only**. The durable structured record and the
-  voiceprint embeddings are **kept** (they are the compounding asset,
-  [ADR-0026](0026-shared-speaker-identity-store.md)); only the listenable substrate is removed.
+### 7 — The voiceprint library is OKF too — one provenance graph
+
+The library is the same kind of thing as the sessions, not a separate database. **Each voiceprint
+is a markdown + frontmatter document** that links to the session blobs its embeddings were
+extracted from; each session `.md` links the voiceprints present in it. Sessions ↔ library form
+**one browsable provenance graph** of small text files pointing at binary blobs — walkable with a
+text editor and `tar`, no index server. This is decision 2's reference-as-graph applied to
+identity: where a voiceprint came from, and which sessions a person appears in, are both answerable
+by following links.
+
+### 8 — Tags carry purpose; finalize bounds retention
+
+**Tags** (already `tags[]` in the Canonical IR schema, mirrored in pack frontmatter) carry a pack's
+purpose — `meeting` / `transcription` / `training` / `enrollment` … — and let the store filter and
+batch operations. A pack has two lifecycle states:
+
+- **active** — audio retained → both regeneration tiers.
+- **finalized** — audio **stripped** → re-render only. The record and the extracted voiceprints
+  are **kept** (the compounding asset); only the listenable substrate is removed.
 
 Finalize bounds biometric retention without discarding the transcript or the identity graph.
-Stripping audio (whether by explicit finalize, a retention **TTL**, or `DELETE`) is a
-**crypto-erase**: shred the clips' per-record data key per [ADR-0023](0023-voiceprint-lifecycle.md),
-not merely an index-row delete. A retention TTL and an **opt-in** posture govern how long a pack
-may stay active; the default must not silently expand biometric retention beyond what
-[ADR-0013](0013-retention-and-consent.md) permits.
+Stripping audio (explicit finalize, a retention **TTL**, or `DELETE`) is a **crypto-erase** — shred
+the clips' per-record data key ([ADR-0023](0023-voiceprint-lifecycle.md)), not an index-row delete.
 
 ### Cross-cutting obligations
 
-- **Consent ([ADR-0013](0013-retention-and-consent.md), a stub).** Retaining third-party
-  colleagues' voice audio — even compressed, speaker-isolated clips — is exactly the case 0013
-  defers. This ADR names that as an honest dependency: the active-state retention TTL and opt-in
-  posture **co-finalize with 0013** (the same pattern [ADR-0023](0023-voiceprint-lifecycle.md)
-  used). This ADR sets the *mechanism* (finalize, TTL, crypto-erase); 0013 sets the *policy*.
+- **Consent ([ADR-0013](0013-retention-and-consent.md), a stub).** Retaining third-party voice
+  audio is exactly the case 0013 defers. This ADR sets the *mechanism* (finalize, TTL,
+  crypto-erase); the active-state TTL and opt-in posture **co-finalize with 0013**, which sets the
+  *policy*.
 - **Encryption at rest ([ADR-0023](0023-voiceprint-lifecycle.md)).** Retained clips and embeddings
   are sealed under the per-record data-key envelope; finalize and delete are crypto-erase by
   data-key shred.
@@ -168,85 +175,106 @@ may stay active; the default must not silently expand biometric retention beyond
 
 ### Scope boundary
 
-This ADR decides the **storage format + pack + regeneration/finalize lifecycle only.** It
-**enables but does not define** its consumers, and must not absorb them:
+This ADR decides the **session-pack format, the regeneration/finalize lifecycle, the universal
+extraction interface, and enrollment-as-a-training-pack.** It **enables but does not define** its
+consumers, and must not absorb them:
 
-- the supervised **teaching-mode UX** ([ADR-0029](0029-teaching-mode-ux.md), future);
-- **corpus-priming** of live sessions from prior packs (an implementation + a
-  [ADR-0024](0024-live-speaker-identification.md)/[ADR-0027](0027-robust-online-speaker-attribution.md)
-  amendment, not this ADR);
+- the interactive **teaching / adjudication UX** ([ADR-0029](0029-teaching-mode-ux.md), future);
 - the end-of-session **reconciliation questionnaire / adaptive trigger**
   ([ADR-0030](0030-reconciliation-questionnaire.md), future) — this ADR only reserves a slot for
-  its answers in pack metadata.
+  its answers in pack metadata;
+- **corpus-priming** of live sessions from prior packs (an implementation plus a
+  [ADR-0024](0024-live-speaker-identification.md)/[ADR-0027](0027-robust-online-speaker-attribution.md)
+  amendment, not this ADR).
 
 ## Consequences
 
 ### Good
 
-- Retroactive refinement becomes possible at all: a better gallery can reach an old meeting, which
-  the markdown-only live path made impossible.
-- One source-of-truth contract for batch *and* live — the IR — with transcripts as pure renders;
-  no parallel live format to maintain.
-- The two-tier split makes the cost model honest: re-render is free and always available;
-  re-process is expensive and audio-gated, and the gate is visible in the pack's state.
+- One artifact kind for every capture: conversation and enrollment share persistence, extraction,
+  finalize, and consent — no second store, no duplicate read-aloud path to maintain.
+- Packs are open OKF "just files": openable with `tar` + stdlib, self-describing (the blob carries
+  its own `.md`), and independent of any transcribbler runtime — the value outlives the tool.
+- One source-of-truth contract for batch *and* live — the extended Canonical IR — with transcripts
+  as pure renders; retroactive relabel/merge/split becomes a cheap edit-plus-re-render.
+- The two-tier split makes the cost model honest and the gate visible: re-render is free and always
+  available; re-process is expensive and audio-gated by the pack's state.
+- Universal extraction turns *any* pack into voiceprint training data, and the tag filter lets the
+  store re-extract a whole class of packs when a model improves.
+- Sessions and library form one browsable provenance graph — where a voiceprint came from and which
+  sessions a person appears in are answerable by following links, not querying a database.
 - One portable pack is a single unit to move, seal, replicate, and expire — the shape
   [ADR-0025](0025-deployment-topology-and-data-locality.md)/[ADR-0026](0026-shared-speaker-identity-store.md)
   already assume.
-- Finalize gives a clean privacy transition: bound biometric retention without losing the
-  transcript or the compounding identity graph.
 
 ### Bad / costs
 
-- Retaining third-party voice audio (even compressed) raises the consent/retention bar; the TTL,
-  opt-in posture, encryption, and crypto-erase are now load-bearing, and the policy is blocked on
-  [ADR-0013](0013-retention-and-consent.md).
-- Storage grows: even opus-class clips (~10 MB/hr) plus embeddings plus the record accumulate per
-  active session — finalize/TTL is what bounds it, and must actually run.
-- The Canonical IR schema gains session-scoped fields (UID/confidence/embedding-ref/timing) — an
-  additive, versioned schema change ([ADR-0006](0006-canonical-ir-contract.md)'s
-  `ir_schema_version` handshake, as [ADR-0023](0023-voiceprint-lifecycle.md) used for `source`).
-- Re-process is only as good as the retained substrate: speaker-isolated compressed clips cap the
-  fidelity a future pass can recover versus the original live audio.
+- Retaining third-party voice audio (even compressed) **raises the consent/retention bar**; the
+  TTL, opt-in posture, encryption, and crypto-erase are load-bearing, and the *policy* is blocked
+  on [ADR-0013](0013-retention-and-consent.md), which must co-finalize.
+- **Storage grows** — opus-class clips (~10 MB/hr) plus embeddings plus the record accumulate per
+  active pack; growth is bounded only by finalize/TTL, which must actually run.
+- The **Canonical IR gains session-scoped fields** (UID/confidence/embedding-ref/timing, `tags[]`
+  purpose) — an additive, versioned schema change under [ADR-0006](0006-canonical-ir-contract.md)'s
+  `ir_schema_version` handshake, as [ADR-0023](0023-voiceprint-lifecycle.md) did for `source`.
+- **`capture.py` is 612 lines (>500 review threshold).** When retention lands, routing capture
+  through the pack must **split it at its natural seams** — audio-path detection, the
+  window-transcribe loop, and session drain-and-persist — not grow it. The persist seam is exactly
+  where the current markdown-write and chunk-unlink live, so extracting it is a prerequisite, not
+  incidental cleanup.
+- **Re-process fidelity is capped by the retained substrate:** speaker-isolated compressed clips
+  bound what a future pass can recover versus the original live audio.
 
 ### Neutral
 
-- **`capture.py` is already 522 lines (>500 review threshold);** routing live capture through the
-  record + retention must **split it at its natural seams — audio-path detection, the
-  window-transcribe loop, and session drain-and-persist — not grow it.** The persist seam is
-  precisely where the current markdown-write and chunk-unlink live, so it is the seam this ADR
-  changes; extracting it is a prerequisite, not incidental cleanup.
-- The live view stays provisional ([ADR-0027](0027-robust-online-speaker-attribution.md)); the
-  pack is what lets its provisional attribution be superseded later rather than frozen in markdown.
-- "Active vs finalized" becomes an operator-visible session state, surfaced in awareness/control
+- **Current build state (context, not a new decision):** live capture **already routes through the
+  Canonical IR** (`ir.assemble_session`, `source.kind = "session"`) and writes `ir.json` plus a
+  rendered `.md`; **XDG storage exists** (`paths.py`: `sessions/<id>/`, `library/`); and a durable
+  voiceprint **`library.py`** plus a stopgap read-aloud **`enroll`** already exist. The pack format
+  *formalizes and unifies* these — it does not introduce persistence from scratch, it names the
+  boundary and merges the enroll path into it.
+- The live view stays provisional ([ADR-0027](0027-robust-online-speaker-attribution.md)); the pack
+  is what lets its provisional attribution be superseded later rather than frozen in markdown.
+- "Active vs finalized" becomes an operator-visible pack state, surfaced in awareness/control
   ([ADR-0010](0010-operator-awareness-and-control.md)) alongside deployment mode.
 
 ## Alternatives considered
 
-- **Markdown transcript as the only artifact (status quo live path).** Rejected: lossy, unre-
-  labelable, unre-renderable, and it destroys the re-process substrate — the problem this ADR exists
-  to fix (Decision 1a).
-- **A separate live session format alongside the Canonical IR.** Rejected: two source-of-truth
-  formats for no benefit; the IR needs only additive fields (Decision 1b).
+- **Markdown transcript as the only artifact (status quo live path).** Rejected: lossy,
+  unre-labelable, unre-renderable, and it destroys the re-process substrate — the problem this ADR
+  exists to fix.
+- **A separate live/session format alongside the Canonical IR.** Rejected: two source-of-truth
+  formats to schema, version, and render for no gain; the IR needs only additive fields.
+- **A dedicated enrollment subsystem separate from session storage.** Rejected: enrollment and
+  conversation are the same underlying act (capture + keep the substrate); a separate path
+  duplicates storage, extraction, and consent for one thing. Enrollment is a single-speaker,
+  training-tagged pack.
+- **A proprietary/opaque session database.** Rejected: it fails OKF's format-not-platform test —
+  the artifacts would depend on a transcribbler runtime to read, could not be opened with `tar`,
+  and would not survive the tool. Open files that reference their resources keep the value in the
+  files.
 - **Retain raw WAV for maximum re-process fidelity.** Rejected: ~10× the size at rest for fidelity
   the models do not consume; compressed speaker-isolated clips are ASR/diarization-adequate and
-  double as adjudication exemplars (Decision 4).
-- **Keep audio indefinitely (no finalize).** Rejected: unbounded biometric retention of third-party
-  voice, contrary to [ADR-0013](0013-retention-and-consent.md)/[ADR-0024](0024-live-speaker-identification.md);
-  finalize + TTL bound it while preserving the durable record and embeddings.
-- **One regeneration path (re-transcribe on demand).** Rejected: conflates the free restyle with the
-  expensive, audio-gated re-derivation, hiding both the cost and the fact that re-processing is
+  double as adjudication exemplars.
+- **Keep audio indefinitely (no finalize).** Rejected: unbounded biometric retention of
+  third-party voice, contrary to
+  [ADR-0013](0013-retention-and-consent.md)/[ADR-0024](0024-live-speaker-identification.md);
+  finalize + TTL bound it while preserving the durable record and voiceprints.
+- **One regeneration path (re-transcribe on demand).** Rejected: conflates the free restyle with
+  the expensive, audio-gated re-derivation, hiding both the cost and the fact that re-processing is
   impossible once audio is gone.
 
 ## Related
 
-- [ADR-0006](0006-canonical-ir-contract.md) — the Canonical IR this record extends; source-of-truth-vs-renders is its principle, applied to live capture
+- [ADR-0006](0006-canonical-ir-contract.md) — the Canonical IR the record extends; source-of-truth-vs-renders applied to live capture
 - [ADR-0014](0014-ir-epoch-session-identity.md) — the deferred session/epoch identity the record now actualizes
 - [ADR-0024](0024-live-speaker-identification.md) — UID/label split, merge/split, evidence store, clip-local rule the pack inherits
-- [ADR-0027](0027-robust-online-speaker-attribution.md) — the spike that writes markdown + unlinks audio; its offline reconciliation is Decision 3's re-process, made repeatable
-- [ADR-0023](0023-voiceprint-lifecycle.md) — envelope-at-rest + crypto-erase for retained clips/embeddings
+- [ADR-0027](0027-robust-online-speaker-attribution.md) — provisional live attribution whose offline reconciliation is this ADR's re-process, made repeatable
+- [ADR-0023](0023-voiceprint-lifecycle.md) — envelope-at-rest + crypto-erase for retained clips/embeddings; the voiceprint records the library graph is built from
 - [ADR-0025](0025-deployment-topology-and-data-locality.md) — per-artifact locality the pack slots into
 - [ADR-0026](0026-shared-speaker-identity-store.md) — the pack as replication/reconciliation unit
 - [ADR-0013](0013-retention-and-consent.md) — biometric consent/retention this ADR's TTL + opt-in co-finalize with
 - [ADR-0022](0022-live-audio-ingest.md) — the sessionized live-ingest service this record/retention feeds
 - [ADR-0009](0009-capture-cadence.md) — session epoch = one pack = one IR document
 - [ADR-0029](0029-teaching-mode-ux.md), [ADR-0030](0030-reconciliation-questionnaire.md) — consumers this ADR enables but does not define
+- [session-pack format spec](../specs/session-pack.md) — the concrete on-disk contract this ADR decides the model for
