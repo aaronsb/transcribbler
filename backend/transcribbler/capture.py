@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -116,7 +117,7 @@ def detect_paths(app: str = "Google Chrome", log: Log | None = None) -> Paths:
         meeting = cand[0]
     else:
         scored = sorted(((c, _mean_volume_db(c)) for c in cand), key=lambda x: x[1], reverse=True)
-        say(f"  meeting-path probe: " + ", ".join(f"{c.split('.monitor')[0]}={v:.0f}dB" for c, v in scored))
+        say("  meeting-path probe: " + ", ".join(f"{c.split('.monitor')[0]}={v:.0f}dB" for c, v in scored))
         meeting = scored[0][0]
 
     # operator mic — the source the app's *input* stream uses
@@ -142,6 +143,32 @@ class Turn:
     end: float
     speaker: str
     text: str
+
+
+class Controls:
+    """Thread-safe run controls for the interactive console: pause + stop.
+
+    A keyboard-listener thread flips these; the capture loop polls them. Pausing
+    discards incoming chunks (listening off), it does not pause the ffmpeg capture.
+    """
+
+    def __init__(self) -> None:
+        self._paused = threading.Event()
+        self._stopped = threading.Event()
+
+    def toggle_pause(self) -> None:
+        self._paused.clear() if self._paused.is_set() else self._paused.set()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
+
+    def stop(self) -> None:
+        self._stopped.set()
+
+    @property
+    def stopped(self) -> bool:
+        return self._stopped.is_set()
 
 
 _FFMPEG_OP_TIMEOUT = 60  # seconds; a per-chunk ffmpeg op hanging longer is dropped
@@ -261,6 +288,11 @@ def run_capture(
     threshold: float = 0.5,
     gate_db: float = -55.0,
     operator_label: str = "You",
+    on_turn: Callable[[Turn], None] | None = None,
+    on_chunk: Callable[[int, int, float, bool], None] | None = None,
+    on_new_speaker: Callable[[str], None] | None = None,
+    controls: Controls | None = None,
+    banner: bool = True,
     workdir: Path | None = None,
     log: Log | None = None,
 ) -> None:
@@ -283,10 +315,11 @@ def run_capture(
         paths = Paths(mic=paths.mic, meeting=meeting)
 
     use_diar = diarize and profile.diar.enabled
-    gallery = SessionGallery(threshold) if use_diar else None
+    gallery = SessionGallery(threshold, on_new_speaker=on_new_speaker) if use_diar else None
     daemon = DiarizerDaemon(profile.diar.model, work, log=say) if use_diar else None
 
-    say(f"capturing → {out_path} (Ctrl-C to stop)")
+    if banner:
+        say(f"capturing → {out_path} (Ctrl-C to stop)")
     out = None
     proc = None
     ff_log = None
@@ -321,9 +354,14 @@ def run_capture(
             dt = time.monotonic() - t0
             for t in turns:
                 out.write(f"[{_fmt_ts(t.start)}] {t.speaker}: {t.text}\n")
+                if on_turn is not None:
+                    on_turn(t)
             out.flush()
-            say(f"  chunk {n:05d}: {len(turns)} turns in {dt:.1f}s "
-                f"({'keeps up' if dt < segment_s else 'LAGS'} vs {segment_s}s)")
+            if on_chunk is not None:
+                on_chunk(n, len(turns), dt, dt < segment_s)
+            else:
+                say(f"  chunk {n:05d}: {len(turns)} turns in {dt:.1f}s "
+                    f"({'keeps up' if dt < segment_s else 'LAGS'} vs {segment_s}s)")
         finally:
             processed.add(n)
             chunk.unlink(missing_ok=True)
@@ -336,7 +374,7 @@ def run_capture(
         proc = _ffmpeg_segmenter(paths, work, segment_s, ff_log)
         if daemon is not None:
             daemon.start()  # one-time model load; ffmpeg is already capturing
-        while True:
+        while not (controls is not None and controls.stopped):
             if proc.poll() is not None:
                 tail = (work / "ffmpeg.log").read_bytes()[-500:].decode(errors="replace")
                 raise RuntimeError(f"ffmpeg capture exited ({proc.returncode}): {tail}")
@@ -353,6 +391,10 @@ def run_capture(
             # a chunk is complete once the *next* one exists (ffmpeg finalizes N's
             # header before opening N+1)
             for n in [n for n in ready if (n + 1) in ready and n not in processed]:
+                if controls is not None and controls.paused:
+                    (work / f"chunk_{n:05d}.wav").unlink(missing_ok=True)
+                    processed.add(n)  # listening off: discard rather than transcribe
+                    continue
                 _process(n)
             time.sleep(1.0)
     except KeyboardInterrupt:
@@ -371,7 +413,12 @@ def run_capture(
         # the tail (incl. the last chunk, which never got an N+1 successor).
         if out is not None:
             for n in _chunk_indices():
-                if n not in processed:
+                if n in processed:
+                    continue
+                if controls is not None and controls.paused:
+                    (work / f"chunk_{n:05d}.wav").unlink(missing_ok=True)
+                    processed.add(n)  # quit-while-paused: discard the muted tail, don't transcribe it
+                else:
                     _process(n)  # drain uses the daemon, so close it after
             out.close()
         if daemon is not None:
