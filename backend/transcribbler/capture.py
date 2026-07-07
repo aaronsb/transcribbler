@@ -289,7 +289,10 @@ def run_capture(
     gate_db: float = -55.0,
     operator_label: str = "You",
     on_turn: Callable[[Turn], None] | None = None,
+    on_chunk: Callable[[int, int, float, bool], None] | None = None,
+    on_new_speaker: Callable[[str], None] | None = None,
     controls: Controls | None = None,
+    banner: bool = True,
     workdir: Path | None = None,
     log: Log | None = None,
 ) -> None:
@@ -312,10 +315,11 @@ def run_capture(
         paths = Paths(mic=paths.mic, meeting=meeting)
 
     use_diar = diarize and profile.diar.enabled
-    gallery = SessionGallery(threshold) if use_diar else None
+    gallery = SessionGallery(threshold, on_new_speaker=on_new_speaker) if use_diar else None
     daemon = DiarizerDaemon(profile.diar.model, work, log=say) if use_diar else None
 
-    say(f"capturing → {out_path} (Ctrl-C to stop)")
+    if banner:
+        say(f"capturing → {out_path} (Ctrl-C to stop)")
     out = None
     proc = None
     ff_log = None
@@ -353,8 +357,11 @@ def run_capture(
                 if on_turn is not None:
                     on_turn(t)
             out.flush()
-            say(f"  chunk {n:05d}: {len(turns)} turns in {dt:.1f}s "
-                f"({'keeps up' if dt < segment_s else 'LAGS'} vs {segment_s}s)")
+            if on_chunk is not None:
+                on_chunk(n, len(turns), dt, dt < segment_s)
+            else:
+                say(f"  chunk {n:05d}: {len(turns)} turns in {dt:.1f}s "
+                    f"({'keeps up' if dt < segment_s else 'LAGS'} vs {segment_s}s)")
         finally:
             processed.add(n)
             chunk.unlink(missing_ok=True)
@@ -406,7 +413,12 @@ def run_capture(
         # the tail (incl. the last chunk, which never got an N+1 successor).
         if out is not None:
             for n in _chunk_indices():
-                if n not in processed:
+                if n in processed:
+                    continue
+                if controls is not None and controls.paused:
+                    (work / f"chunk_{n:05d}.wav").unlink(missing_ok=True)
+                    processed.add(n)  # quit-while-paused: discard the muted tail, don't transcribe it
+                else:
                     _process(n)  # drain uses the daemon, so close it after
             out.close()
         if daemon is not None:

@@ -17,6 +17,7 @@ and there are only a handful of speakers, so cost is negligible.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -45,8 +46,9 @@ class SessionGallery:
     real audio (ADR-0024 names threshold choice as a real decision).
     """
 
-    def __init__(self, threshold: float = 0.5):
+    def __init__(self, threshold: float = 0.5, *, on_new_speaker: Callable[[str], None] | None = None):
         self.threshold = threshold
+        self._on_new_speaker = on_new_speaker
         self._speakers: list[_Speaker] = []
         self._n = 0
 
@@ -55,6 +57,8 @@ class SessionGallery:
         sid = f"S{self._n}"
         if centroid is not None:  # only matchable speakers join the gallery
             self._speakers.append(_Speaker(sid, list(centroid), 1))
+            if self._on_new_speaker is not None:
+                self._on_new_speaker(sid)
         return sid
 
     @staticmethod
@@ -93,7 +97,6 @@ class SessionGallery:
             matched[label] = sp
             used_sessions.add(sp.sid)
 
-        emb_by_label = dict(usable)
         for label, emb in usable:
             sp = matched.get(label)
             if sp is not None:

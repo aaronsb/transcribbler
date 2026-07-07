@@ -124,9 +124,47 @@ def _key_listener(controls, say) -> None:
             controls.toggle_pause()
             say("  ⏸  paused (listening off)" if controls.paused else "  ▶  resumed")
         elif ch in ("q", "Q"):
-            say("  quitting…")
+            say("  quitting… (finalizing the tail)")
             controls.stop()
             break
+
+
+class _LiveConsole:
+    """Scrolling transcript above a single in-place status footer (fancy=TTY only).
+
+    Transcript/announce lines scroll; the per-chunk status is pinned to one line
+    that overwrites in place, so the view stays a continuous timestamped session.
+    All writes are guarded: a closed stdout (`listen | head`) latches drawing off
+    instead of raising.
+    """
+
+    def __init__(self, fancy: bool):
+        self._fancy = fancy
+        self._footer = ""
+        self._dead = False
+
+    def _write(self, s: str) -> None:
+        if self._dead:
+            return
+        try:
+            sys.stdout.write(s)
+            sys.stdout.flush()
+        except BrokenPipeError:
+            self._dead = True  # stdout closed downstream — stop drawing, keep recording
+
+    def line(self, text: str) -> None:
+        self._write(("\r\033[K" if self._footer else "") + text + "\n" + self._footer)
+
+    def status(self, text: str) -> None:
+        if not self._fancy:
+            return
+        self._footer = text
+        self._write("\r\033[K" + text)
+
+    def done(self) -> None:
+        if self._fancy and self._footer:
+            self._write("\n")
+            self._footer = ""
 
 
 def _cmd_listen(args: argparse.Namespace) -> int:
@@ -147,29 +185,41 @@ def _cmd_listen(args: argparse.Namespace) -> int:
 
     out_path = Path(args.output) if args.output else Path(f"transcript-{datetime.now():%Y%m%d-%H%M%S}.md")
     color = sys.stdout.isatty()
+    console = _LiveConsole(fancy=color)
     controls = Controls()
 
     def say(m: str) -> None:
         print(m, file=sys.stderr, flush=True)
 
     def on_turn(turn) -> None:
-        print(_fmt_turn(turn, color), flush=True)  # transcript → stdout; status → stderr
+        console.line(_fmt_turn(turn, color))
 
-    # Single-key controls only when stdin is a real terminal; otherwise run to Ctrl-C.
+    def on_new_speaker(sid: str) -> None:
+        badge = f"\033[{_speaker_color(sid)}m{sid}\033[0m" if color else sid
+        console.line(f"  🆕 new speaker {badge}")
+
+    def on_chunk(n: int, n_turns: int, dt: float, keeps_up: bool) -> None:
+        if not color:
+            return
+        console.status(
+            f"\033[2m· chunk {n:05d} · {n_turns} turns · {dt:.1f}s · "
+            f"{'keeps up' if keeps_up else 'LAGS'} vs {args.segment}s\033[0m"
+        )
+
     old_termios = None
-    if sys.stdin.isatty():
-        import termios
-        import tty
-
-        fd = sys.stdin.fileno()
-        old_termios = termios.tcgetattr(fd)
-        tty.setcbreak(fd)  # ISIG stays on → Ctrl-C still works
-        threading.Thread(target=_key_listener, args=(controls, say), daemon=True).start()
-        say(f"listening → {out_path}    [space] pause/resume    [q] quit")
-    else:
-        say(f"listening → {out_path}    (Ctrl-C to stop)")
-
     try:
+        # cbreak setup lives inside the try so the finally always restores the terminal.
+        if sys.stdin.isatty():
+            import termios
+            import tty
+
+            fd = sys.stdin.fileno()
+            old_termios = termios.tcgetattr(fd)
+            tty.setcbreak(fd)  # ISIG stays on → Ctrl-C still works
+            threading.Thread(target=_key_listener, args=(controls, say), daemon=True).start()
+            say(f"listening → {out_path}    [space] pause/resume    [q] quit (finalizes the tail)")
+        else:
+            say(f"listening → {out_path}    (Ctrl-C to stop)")
         run_capture(
             profile,
             out_path,
@@ -180,13 +230,17 @@ def _cmd_listen(args: argparse.Namespace) -> int:
             diarize=not args.no_diarize,
             threshold=args.threshold,
             on_turn=on_turn,
+            on_chunk=on_chunk,
+            on_new_speaker=on_new_speaker,
             controls=controls,
+            banner=False,
             log=say,
         )
     except KeyboardInterrupt:
         pass
     finally:
         controls.stop()
+        console.done()
         if old_termios is not None:
             import termios
 
