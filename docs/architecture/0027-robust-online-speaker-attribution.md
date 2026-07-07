@@ -1,6 +1,6 @@
 # ADR-0027: Robust online speaker attribution for live capture — overlapping-window diarization + turn-aware attribution
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-07-07
 - **Deciders**: Aaron
 
@@ -62,7 +62,9 @@ decision below lays out the forks and lands a recommendation, for review before 
 
 **Recommendation: 1c.** Temporal linking attacks A at its mechanism — labels are linked by
 when they occur, not by fragile embeddings — while embeddings degrade to a fallback rather than
-the primary key. The cost is affordable given the measured daemon headroom.
+the primary key. The cost is affordable given the measured daemon headroom, and the deciders
+accept the added compute explicitly: warm-daemon margin is worth spending if it substantially
+improves output (2026-07-07).
 
 ### Decision 2 (fixes B) — attribution granularity
 
@@ -75,10 +77,19 @@ the primary key. The cost is affordable given the measured daemon headroom.
   construction, so B cannot occur — but it reshapes the loop, risks hallucination on very short
   (<1 s) turns, and loses cross-turn ASR context. Most invasive.
 
-**Recommendation: adopt 1c first, then choose 2a/2b/2c as a follow-on.** 1c already improves
-turn boundaries and, via emit-only-new-region alignment, reduces B on its own; measure the
-residual before paying for 2b (which reopens ADR-0015) or 2c (the most invasive reshape). 2a is
-the cheap interim if residual B is still visible after 1c.
+**Recommendation: bundle 2a with 1c now; land 2b as the proper fix; reject 2c.** B is largely
+*orthogonal* to 1c — a wider window is, if anything, *more* likely to contain a within-segment
+speaker change — so 1c does not meaningfully reduce B on its own. **2a** (proportional split) is
+cheap, needs no new plumbing, and kills the egregious whole-segment misattributions (the 06:46
+case), so it ships in the first implementation *alongside* 1c. **2b** (word timestamps) is the
+proper fix and the load-bearing capability: it keeps ASR on long windows — preserving
+transcription quality, the *primary* product — *and* attributes each word precisely. It is a
+deliberate, contained reopening of ADR-0015 (add an optional `words` field to `Segment`; cores
+that cannot produce them leave it unset), landed as a fast-follow. **2c is rejected as primary:**
+it inverts the pipeline to optimize the *secondary* concern (identity) at the primary one's
+expense — whisper transcribes worse on short per-turn slices and re-clips words at every turn
+boundary — and, done properly (padding turns for context, then trimming back), it needs word
+timestamps *anyway*. So 2b dominates 2c.
 
 ### Decision 3 — relationship to persistence (scope boundary)
 
@@ -116,8 +127,11 @@ grow into a store redesign.
 - The spike (`capture.py`) remains a spike; this ADR governs its **diarization/attribution
   approach**, which feeds the eventual [ADR-0022](0022-live-audio-ingest.md) sessionized service
   rather than being that service.
-- Residual B after 1c is a measurement, not a foregone conclusion — the 2a/2b/2c choice is
-  deferred to that measurement.
+- **Startup latency: ~one extra chunk (~20 s).** A window needs its predecessor before it can
+  emit, so the first transcript line arrives one hop later than today; steady-state cadence is
+  unchanged.
+- **First-window cold-start.** Window 0 has no shared span, so its labels have no temporal
+  anchor and fall back to embeddings (same as today) — expected, not a regression.
 
 ## Validation
 
