@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import subprocess
 import time
 from collections.abc import Callable
@@ -35,13 +36,18 @@ class DiarizerDaemon:
         *,
         log: Callable[[str], None] | None = None,
         ready_timeout: float = 180.0,
+        read_timeout: float = 120.0,
     ):
         self.model = model or _DEFAULT_MODEL
         self.log_path = workdir / "diarizer.log"
         self._say = log or (lambda _m: None)
         self._ready_timeout = ready_timeout
+        self._read_timeout = read_timeout
         self._proc: subprocess.Popen | None = None
         self._errf = None
+
+    def is_alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
 
     def start(self) -> None:
         if not _SIDECAR_SCRIPT.exists():
@@ -79,6 +85,13 @@ class DiarizerDaemon:
             raise RuntimeError("diarizer daemon is not running")
         self._proc.stdin.write(f"{wav}\n")
         self._proc.stdin.flush()
+        # Bounded wait: a wedged inference must not park the capture loop (or the
+        # shutdown drain) forever. One line per request with no buffered readahead,
+        # so select on the fileno is safe.
+        ready, _, _ = select.select([self._proc.stdout], [], [], self._read_timeout)
+        if not ready:
+            self.close()  # a late reply from a wedged daemon would desync the protocol
+            raise RuntimeError(f"diarizer timed out after {self._read_timeout:.0f}s; see {self.log_path}")
         line = self._proc.stdout.readline()
         if not line:
             raise RuntimeError(f"diarizer daemon closed the pipe; see {self.log_path}")

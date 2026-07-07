@@ -302,6 +302,11 @@ def run_capture(
         return sorted(idx)
 
     def _process(n: int) -> None:
+        nonlocal daemon
+        if daemon is not None and not daemon.is_alive():
+            say("  diarizer stopped — remaining audio → single 'Remote' speaker")
+            daemon.close()
+            daemon = None  # latch off: stop retrying + logging every chunk
         chunk = work / f"chunk_{n:05d}.wav"
         t0 = time.monotonic()
         try:
