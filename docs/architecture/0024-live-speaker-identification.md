@@ -167,6 +167,11 @@ map). The operator's merge/split/name decisions apply to the reconciled result.
 - Threshold tuning (match, open-set floor, dormancy TTL) is corpus- and mic-dependent and has
   no universal constant; getting it wrong yields false-new or false-match errors.
 - A persistent daemon adds process-lifecycle and memory-residency concerns (gallery in RAM).
+- The whole pipeline is tuned for *speech*: ASR and the speaker-embedding model both degrade on
+  full-on music / singing. Sung content transcribes poorly (mostly `[Music]` markers, garbled
+  lyrics) and yields unreliable voiceprints that break stitching in *both* directions —
+  observed merging distinct voices into one and over-splitting one into several. Accuracy on
+  musical audio should not be expected; it is out of the target domain (meetings/conversation).
 
 ### Neutral
 
