@@ -30,6 +30,9 @@ Format: lightweight [MADR](https://adr.github.io/madr/)-style. One decision per 
 | [0021](0021-internet-cloud-worker.md) | Internet access via an authenticated cloud worker (deferred) | Proposed |
 | [0022](0022-live-audio-ingest.md) | Live audio ingest — sessionized chunk submission over the wire | Proposed |
 | [0023](0023-voiceprint-lifecycle.md) | Voiceprint lifecycle — enrollment, store & matching contract | Proposed |
+| [0024](0024-live-speaker-identification.md) | Live speaker identification — online voiceprint matching with human-adjudicated identity | Proposed |
+| [0025](0025-deployment-topology-and-data-locality.md) | Deployment topology — compute placement & data locality across machines | Draft |
+| [0026](0026-shared-speaker-identity-store.md) | Shared speaker-identity store — one identity graph across machines | Draft |
 
 ## Conventions
 
