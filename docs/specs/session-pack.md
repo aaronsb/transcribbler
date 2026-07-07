@@ -51,7 +51,8 @@ $XDG_DATA_HOME/transcribbler/            # default: ~/.local/share/transcribbler
 │   ├── priya-enrollment.md
 │   └── 2026-07-07-141205-0-42-7b1e04-blob.tar.gz
 └── library/                            # the voiceprint graph (OKF too, see §8)
-    ├── 3f9a2c-priya.md                  # one voiceprint = one md + frontmatter
+    ├── 3f9a2c-priya.md                  # one voiceprint = md + frontmatter …
+    ├── 3f9a2c-priya.vec.json            #   … + a sibling holding its 256-d centroid
     └── 9c1d77-jonathan.md
 ```
 
@@ -276,19 +277,18 @@ from every `meeting` pack with the new embedding model."
 
 ### 8.2 Voiceprint record format
 
-A voiceprint is **its own OKF document** under `library/`: markdown + frontmatter, with
-back-references to the session blobs its embeddings came from. The per-speaker embedding **vector is
-carried in the pack's sibling `embeddings.json`** (§4) — keyed by canonical speaker id, sealed per
-ADR-0023 once encryption-at-rest lands — because the Canonical IR schema
-(`additionalProperties: false`) cannot hold it inline; the voiceprint's `sources` back-references
+A voiceprint is **its own OKF document** under `library/`: a `<uid>.md` (markdown + frontmatter)
+with back-references to the session blobs its embeddings came from. Its **compounded running-mean
+centroid** — the mean over every pack folded in, distinct from any one pack's `embeddings.json`
+seed (§4) — lives in a **sibling `library/<uid>.vec.json`**, keeping the 256-d vector out of the
+YAML (sealed per ADR-0023 once encryption-at-rest lands). The voiceprint's `sources` back-references
 are the graph edges.
 
-> **Implementation status (current build):** the voiceprint **record** is still stored as **one
-> JSON per voiceprint** (`library/<uid>.json`, `library.py`), *not* the md + frontmatter document
-> described below. The `sources` graph edge, running-mean `centroid`, and `samples` weight already
-> match this target; only the record *format* migration to md + frontmatter is outstanding, tracked
-> by **GitHub issue #29**. The `uid` is seeded `<pack_uid>-<name>` from the first pack, with
-> matching by name across packs (a returning speaker compounds one voiceprint).
+> **Implementation status (current build):** realized (GitHub issue #29). `library.py` writes the
+> `<uid>.md` record + sibling `<uid>.vec.json` via the shared no-dependency `frontmatter` emitter/
+> parser; legacy `<uid>.json` records are still read and migrated to the md form on next save. The
+> `uid` is seeded `<pack_uid>-<name>` from the first pack, with matching by name across packs (a
+> returning speaker compounds one voiceprint).
 
 ```yaml
 ---

@@ -31,9 +31,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import library, paths, render
+from . import frontmatter, library, paths, render
 
-SPEC_VERSION = "0.1"
+SPEC_VERSION = library.SPEC_VERSION  # single source (library can't import pack; pack imports it)
 
 
 def new_uid() -> str:
@@ -59,42 +59,7 @@ def blob_name(started: datetime, *, start_s: int, length_s: int, uid: str) -> st
     return f"{started:%Y-%m-%d-%H%M%S}-{start_s}-{length_s}-{uid}-blob.tar.gz"
 
 
-def _scalar(value: object) -> str:
-    """Render one frontmatter scalar, preserving its YAML type.
-
-    Ints/bools emit bare; everything else is double-quoted (and its ``"``/``\\`` escaped) so
-    a spec-conformant reader (spec §5/§6) sees the intended *string* — otherwise ``id: 203346``
-    would parse as an int, ``spec_version: 0.1`` as a float, ``timestamp: …Z`` as a date, and a
-    name containing ``:`` or a leading ``#`` would emit malformed YAML.
-    """
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int):
-        return str(value)
-    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
-
-
-def _frontmatter(meta: dict) -> str:
-    """Minimal deterministic YAML frontmatter for flat scalars + string lists.
-
-    Deliberately hand-rolled: the sidecar frontmatter is a small, closed set of flat
-    fields (spec §5), so we avoid a YAML dependency and keep output stable/diffable.
-    """
-    lines = ["---"]
-    for key, value in meta.items():
-        if value is None:
-            continue
-        if isinstance(value, list):
-            if not value:
-                lines.append(f"{key}: []")
-            else:
-                lines.append(f"{key}:")
-                lines.extend(f"  - {_scalar(item)}" for item in value)
-        else:
-            lines.append(f"{key}: {_scalar(value)}")
-    lines.append("---")
-    return "\n".join(lines) + "\n"
+_frontmatter = frontmatter.emit  # the pack sidecar's frontmatter (spec §5); shared emitter
 
 
 def _label_of(speaker: dict) -> str:
