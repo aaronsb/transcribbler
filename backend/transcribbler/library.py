@@ -73,7 +73,14 @@ def save(vp: Voiceprint) -> None:
 
 
 def _fold(centroid: list[float], count: int, emb: list[float]) -> list[float]:
-    """Fold one embedding into a centroid as a running mean (matches SessionGallery)."""
+    """Fold one embedding into a centroid as a running mean (matches SessionGallery).
+
+    Requires matching dimensionality — ``zip`` would otherwise silently truncate to the
+    shorter vector and corrupt the centroid (e.g. folding a new model's differently-sized
+    embedding into an old print, which the enroll docstring flags).
+    """
+    if len(centroid) != len(emb):
+        raise ValueError(f"embedding dim {len(emb)} != centroid dim {len(centroid)}")
     return [(c * count + e) / (count + 1) for c, e in zip(centroid, emb)]
 
 

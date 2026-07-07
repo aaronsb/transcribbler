@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import tarfile
@@ -44,12 +45,22 @@ def test_blob_name_grammar():
 
 
 def test_frontmatter_emits_scalars_and_lists():
-    fm = pack._frontmatter({"id": "abc123", "tags": ["enrollment", "training"], "empty": [], "skip": None})
+    fm = pack._frontmatter(
+        {"id": "203346", "start": 0, "tags": ["enrollment", "training"], "empty": [], "skip": None}
+    )
     assert fm.startswith("---\n") and fm.rstrip().endswith("---")
-    assert "id: abc123" in fm
-    assert "tags:\n  - enrollment\n  - training" in fm
+    assert 'id: "203346"' in fm  # string stays a string (not parsed as int 203346)
+    assert "start: 0" in fm  # ints emit bare
+    assert 'tags:\n  - "enrollment"\n  - "training"' in fm
     assert "empty: []" in fm
     assert "skip" not in fm  # None values are dropped
+
+
+def test_frontmatter_quotes_yaml_special_values():
+    # a name with a colon-space would emit malformed YAML if unquoted (finding #6)
+    fm = pack._frontmatter({"title": "Dr: Priya", "note": 'a "quoted" # hash'})
+    assert 'title: "Dr: Priya"' in fm
+    assert 'note: "a \\"quoted\\" # hash"' in fm
 
 
 def test_slug():
@@ -75,9 +86,9 @@ def test_write_pack_lands_two_loose_artifacts(tmp_path, monkeypatch):
     assert result.md_path.exists() and result.md_path.name == "2026-07-07-priya-enrollment.md"
     assert result.blob_path.exists() and result.blob_path.name.endswith("-blob.tar.gz")
     fm = result.md_path.read_text()
-    assert "type: session_pack" in fm
-    assert f"blob: {result.blob_path.name}" in fm
-    assert "tags:\n  - enrollment\n  - training" in fm
+    assert 'type: "session_pack"' in fm
+    assert f'blob: "{result.blob_path.name}"' in fm
+    assert 'tags:\n  - "enrollment"\n  - "training"' in fm
 
 
 def test_blob_is_self_describing(tmp_path, monkeypatch):
@@ -160,9 +171,6 @@ def test_extract_is_idempotent(tmp_path, monkeypatch):
 
 def test_extract_rejects_pack_without_embeddings(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
-    import io
-    import tarfile
-
     bogus = tmp_path / "2026-07-07-000000-0-1-nope00-blob.tar.gz"
     with tarfile.open(bogus, "w:gz") as tar:
         data = b'{"speakers": []}'
@@ -192,4 +200,33 @@ def test_active_pack_carries_opus_audio(tmp_path, monkeypatch):
     )
     with tarfile.open(result.blob_path, "r:gz") as tar:
         members = tar.getnames()
-    assert "audio/Priya.opus" in members  # speaker-isolated clip named by label
+    assert f"audio/{sid}.opus" in members  # clip keyed by collision-free canonical id
+
+
+def test_audio_falls_back_to_source_when_opus_unavailable(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setattr(pack, "_to_opus", lambda src, dst: False)  # simulate no libopus
+    wav = tmp_path / "clip.wav"
+    wav.write_bytes(b"RIFF....WAVEfake")  # opaque bytes: fallback just archives them as-is
+    ir = _enrollment_ir("Priya")
+    sid = ir["speakers"][0]["id"]
+    result = pack.write_pack(
+        ir, title="Priya enrollment", tags=["training"],
+        embeddings={sid: [1.0, 0.0, 0.0]}, audio={sid: wav}, started=STARTED,
+    )
+    with tarfile.open(result.blob_path, "r:gz") as tar:
+        members = tar.getnames()
+    assert f"audio/{sid}.wav" in members  # source clip kept, pack + voiceprint not lost
+    assert pack.extract(result.blob_path)[0].name == "Priya"
+
+
+def test_extract_rejects_corrupt_json(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    bogus = tmp_path / "2026-07-07-000000-0-1-bad000-blob.tar.gz"
+    with tarfile.open(bogus, "w:gz") as tar:
+        for member, data in [("record.ir.json", b"{not json"), ("embeddings.json", b"{}")]:
+            info = tarfile.TarInfo(member)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    with pytest.raises(ValueError, match="not an extractable pack"):
+        pack.extract(bogus)

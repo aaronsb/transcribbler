@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from transcribbler import library
 
 E1 = [1.0, 0.0, 0.0]
@@ -29,6 +31,13 @@ def test_reenroll_compounds_the_centroid(tmp_path, monkeypatch):
     assert abs(vp.centroid[0] - 0.5) < 1e-9
     assert abs(vp.centroid[1] - 0.5) < 1e-9
     assert len(library.load_all()) == 1  # same person, not a duplicate
+
+
+def test_reenroll_rejects_dimensionality_mismatch(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    library.enroll("Aaron", E1)  # 3-d
+    with pytest.raises(ValueError, match="dim"):
+        library.enroll("Aaron", [0.1, 0.2, 0.3, 0.4])  # a 4-d embedding must not truncate
 
 
 def test_best_match_picks_nearest_over_threshold(tmp_path, monkeypatch):

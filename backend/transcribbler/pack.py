@@ -59,6 +59,22 @@ def blob_name(started: datetime, *, start_s: int, length_s: int, uid: str) -> st
     return f"{started:%Y-%m-%d-%H%M%S}-{start_s}-{length_s}-{uid}-blob.tar.gz"
 
 
+def _scalar(value: object) -> str:
+    """Render one frontmatter scalar, preserving its YAML type.
+
+    Ints/bools emit bare; everything else is double-quoted (and its ``"``/``\\`` escaped) so
+    a spec-conformant reader (spec §5/§6) sees the intended *string* — otherwise ``id: 203346``
+    would parse as an int, ``spec_version: 0.1`` as a float, ``timestamp: …Z`` as a date, and a
+    name containing ``:`` or a leading ``#`` would emit malformed YAML.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def _frontmatter(meta: dict) -> str:
     """Minimal deterministic YAML frontmatter for flat scalars + string lists.
 
@@ -74,9 +90,9 @@ def _frontmatter(meta: dict) -> str:
                 lines.append(f"{key}: []")
             else:
                 lines.append(f"{key}:")
-                lines.extend(f"  - {item}" for item in value)
+                lines.extend(f"  - {_scalar(item)}" for item in value)
         else:
-            lines.append(f"{key}: {value}")
+            lines.append(f"{key}: {_scalar(value)}")
     lines.append("---")
     return "\n".join(lines) + "\n"
 
@@ -85,12 +101,22 @@ def _label_of(speaker: dict) -> str:
     return speaker.get("display_name") or speaker["id"]
 
 
-def _to_opus(src: Path, dst: Path) -> None:
-    subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
-         "-c:a", "libopus", "-b:a", "24k", str(dst)],
-        check=True,
-    )
+def _to_opus(src: Path, dst: Path) -> bool:
+    """Transcode ``src`` → opus at ``dst``. Returns False if the encoder is unavailable.
+
+    A minimal/static ffmpeg without the libopus encoder is common; the caller falls back to
+    the source clip (spec §4: the record references clips by role/UID, not codec) rather than
+    losing the pack's audio — the voiceprint fold never needs the clip at all.
+    """
+    try:
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+             "-c:a", "libopus", "-b:a", "24k", str(dst)],
+            check=True,
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
 
 
 def _normalize(info: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -126,8 +152,10 @@ def write_pack(
     """Write one session pack: the loose ``.md`` sidecar + the self-describing blob.
 
     ``embeddings`` and ``audio`` are keyed by canonical speaker id (``S0``, ``S1`` …), as
-    they appear in ``ir['speakers']``. ``audio`` sources are transcoded to opus inside the
-    blob under ``audio/<label>.opus``. The pack is written **active** (audio present).
+    they appear in ``ir['speakers']``. Each clip is archived under ``audio/<id>.<ext>`` —
+    keyed by the collision-free canonical id (not the display label, which two speakers can
+    share), opus when the encoder is present else the source codec. The pack is written
+    **active** (audio present).
     """
     started = started or datetime.now(timezone.utc)
     uid = uid or new_uid()
@@ -166,8 +194,10 @@ def write_pack(
                 if not src.exists():
                     continue
                 opus = Path(clips) / f"{sid}.opus"
-                _to_opus(src, opus)
-                tar.add(opus, arcname=f"audio/{label_by_id.get(sid, sid)}.opus", filter=_normalize)
+                if _to_opus(src, opus):
+                    tar.add(opus, arcname=f"audio/{sid}.opus", filter=_normalize)
+                else:  # no libopus encoder → keep the source clip rather than lose the audio
+                    tar.add(src, arcname=f"audio/{sid}{src.suffix}", filter=_normalize)
         os.replace(tmp, blob_path)
     finally:
         Path(tmp).unlink(missing_ok=True)
@@ -195,15 +225,21 @@ def extract(blob_path: Path) -> list[library.Voiceprint]:
     into one voiceprint. That is intended for a returning speaker; disambiguating genuine
     name collisions is left to teaching-mode adjudication (future ADR-0029).
 
-    Raises ``ValueError`` on a pack that isn't extractable (e.g. a foreign pack with no
-    ``embeddings.json`` sidecar) rather than an opaque ``KeyError``.
+    Raises ``ValueError`` on any pack that isn't extractable — a foreign pack with no
+    ``embeddings.json`` sidecar (``KeyError``), a truncated/corrupt archive (``TarError``), a
+    non-regular member where a file is expected (``extractfile`` → ``None``), or malformed
+    JSON (``JSONDecodeError``) — rather than leaking an opaque traceback.
     """
     try:
         with tarfile.open(blob_path, "r:gz") as tar:
-            ir = json.loads(tar.extractfile("record.ir.json").read())
-            embed_doc = json.loads(tar.extractfile("embeddings.json").read())
-    except KeyError as e:
-        raise ValueError(f"{blob_path.name}: not an extractable pack (missing {e})") from e
+            record = tar.extractfile("record.ir.json")
+            sidecar = tar.extractfile("embeddings.json")
+            if record is None or sidecar is None:
+                raise KeyError("record.ir.json/embeddings.json is not a regular file")
+            ir = json.loads(record.read())
+            embed_doc = json.loads(sidecar.read())
+    except (KeyError, tarfile.TarError, json.JSONDecodeError) as e:
+        raise ValueError(f"{blob_path.name}: not an extractable pack ({e})") from e
 
     pack_uid = embed_doc["pack_uid"]
     names = {s["id"]: _label_of(s) for s in ir["speakers"]}
