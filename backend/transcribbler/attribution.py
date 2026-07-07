@@ -15,6 +15,7 @@ Pure functions, no I/O: unit-testable without audio.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 # Ignore incidental sub-second overlaps when deciding a segment is multi-speaker;
@@ -106,28 +107,51 @@ def split_segment_by_turns(
     if not runs:
         return [Attributed(seg_start, seg_end, default, text)]
 
-    # collapse runs shorter than the slice floor into the whole-segment case if
-    # they leave a single meaningful speaker; otherwise keep the multi-run split
-    long_runs = [r for r in runs if (r[1] - r[0]) >= _MIN_SLICE_S]
-    speakers = {r[2] for r in long_runs} or {runs[0][2]}
-    if len(speakers) <= 1:
-        return [Attributed(seg_start, seg_end, next(iter(speakers)), text)]
+    # Only runs at/above the slice floor may claim words — sub-floor runs are
+    # incidental (a passing overlap, a diarizer flicker) and must not spawn a
+    # spurious one-word piece. If that leaves one speaker, return the segment whole.
+    long_runs = [r for r in runs if (r[1] - r[0]) >= _MIN_SLICE_S] or [runs[0]]
+    if len({r[2] for r in long_runs}) <= 1:
+        return [Attributed(seg_start, seg_end, long_runs[0][2], text)]
 
-    total = seg_end - seg_start
+    # proportional word counts over the long runs (normalised by their own total
+    # duration), largest-remainder so the counts sum to n exactly
+    total = sum(hi - lo for lo, hi, _ in long_runs)
     n = len(words)
-    # proportional word counts, largest-remainder so the counts sum to n exactly
-    raw = [((hi - lo) / total * n, i) for i, (lo, hi, _) in enumerate(runs)]
+    raw = [((hi - lo) / total * n, i) for i, (lo, hi, _) in enumerate(long_runs)]
     counts = [int(x) for x, _ in raw]
-    leftover = n - sum(counts)
-    for _, i in sorted(raw, key=lambda r: r[0] - int(r[0]), reverse=True)[:leftover]:
+    for _, i in sorted(raw, key=lambda r: r[0] - int(r[0]), reverse=True)[: n - sum(counts)]:
         counts[i] += 1
 
     out: list[Attributed] = []
     cur = 0
-    for (lo, hi, spk), c in zip(runs, counts):
+    for (lo, hi, spk), c in zip(long_runs, counts):
         if c <= 0:
             continue
-        piece = " ".join(words[cur : cur + c])
+        out.append(Attributed(lo, hi, spk, " ".join(words[cur : cur + c])))
         cur += c
-        out.append(Attributed(lo, hi, spk, piece))
     return out
+
+
+def is_repeat(
+    a_start: float, a_end: float, a_text: str,
+    b_start: float, b_end: float, b_text: str,
+    *, min_time_overlap: float = 0.2, min_jaccard: float = 0.6,
+) -> bool:
+    """Whether two emitted turns are the *same* utterance surfacing twice.
+
+    Overlapping windows run independent ASR passes over the shared audio, so a
+    segment straddling an emit boundary can be emitted by both windows (ADR-0027
+    Consequences). Such a pair overlaps in time *and* shares most of its words;
+    a genuine repeat of the same phrase later in the audio does not overlap in
+    time. Used to drop the duplicate before it is written. (The complementary
+    *drop* case — neither window claims a straddling segment — needs word
+    timestamps to close, deferred to 2b.)
+    """
+    if _overlap(a_start, a_end, b_start, b_end) < min_time_overlap:
+        return False
+    ta = set(re.findall(r"\w+", a_text.lower()))
+    tb = set(re.findall(r"\w+", b_text.lower()))
+    if not ta or not tb:
+        return False
+    return len(ta & tb) / len(ta | tb) >= min_jaccard

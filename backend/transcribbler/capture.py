@@ -28,7 +28,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .attribution import Attributed, split_segment_by_turns
+from .attribution import Attributed, is_repeat, split_segment_by_turns
 from .cores import asr_core
 from .diarizer_daemon import DiarizerDaemon
 from .profiles import Profile
@@ -387,6 +387,7 @@ def run_capture(
     ff_log = None
     processed: set[int] = set()
     prev_sid_turns: list[tuple[float, float, str]] = []
+    recent_emitted: list[Turn] = []  # previous window's turns, to dedup the shared seam
     last_k = -2  # last window index emitted; -2 so window 0 reads as non-contiguous
 
     def _chunk_indices() -> list[int]:
@@ -399,7 +400,7 @@ def run_capture(
         return sorted(idx)
 
     def _process(k: int, *, terminal: bool = False) -> None:
-        nonlocal daemon, prev_sid_turns, last_k
+        nonlocal daemon, prev_sid_turns, recent_emitted, last_k
         if daemon is not None and not daemon.is_alive():
             say("  diarizer stopped — remaining audio → single 'Remote' speaker")
             daemon.close()
@@ -428,19 +429,32 @@ def run_capture(
             )
         except Exception as e:  # one bad window must not kill the whole session
             say(f"  window {k:05d}: skipped ({type(e).__name__}: {e})")
-            prev_sid_turns = []  # context broken — don't link across the gap
+            # keep the geometry contiguous so chunk k (still retained) is emitted by
+            # window k+1; only the linking context is lost → fall back to embeddings
+            prev_sid_turns = []
+            last_k = k
         else:
             dt = time.monotonic() - t0
+            written: list[Turn] = []
             for t in turns:
+                # drop a turn the overlapping neighbour already emitted (shared-seam
+                # duplicate); the time-overlap guard keeps genuine later repeats
+                if any(is_repeat(t.start, t.end, t.text, r.start, r.end, r.text) for r in recent_emitted):
+                    continue
                 out.write(f"[{_fmt_ts(t.start)}] {t.speaker}: {t.text}\n")
                 if on_turn is not None:
                     on_turn(t)
+                written.append(t)
             out.flush()
             if on_chunk is not None:
-                on_chunk(k, len(turns), dt, dt < segment_s)
+                on_chunk(k, len(written), dt, dt < segment_s)
             else:
-                say(f"  window {k:05d}: {len(turns)} turns in {dt:.1f}s "
+                say(f"  window {k:05d}: {len(written)} turns in {dt:.1f}s "
                     f"({'keeps up' if dt < segment_s else 'LAGS'} vs {segment_s}s)")
+            recent_emitted = written
+            # sid_turns feeds the next window's temporal link; it is empty when this
+            # window's meeting channel was silent or diarization failed, which forces
+            # the next window onto the embedding fallback (known lag, ADR-0027)
             prev_sid_turns = sid_turns
             last_k = k
         finally:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from transcribbler.attribution import split_segment_by_turns
+from transcribbler.attribution import is_repeat, split_segment_by_turns
 
 
 def _texts(pieces):
@@ -57,3 +57,28 @@ def test_word_counts_are_conserved():
 
 def test_empty_text_yields_nothing():
     assert split_segment_by_turns(0.0, 4.0, "   ", [(0.0, 4.0, "S1")], default="Remote") == []
+
+
+def test_sub_floor_run_gets_no_words_when_splitting():
+    # a 0.2s sliver of S1 between two long speakers is below the floor -> no words,
+    # no spurious piece; the words divide between the two real speakers only
+    turns = [(0.0, 0.2, "S1"), (0.2, 2.0, "S2"), (2.0, 4.0, "S3")]
+    pieces = split_segment_by_turns(0.0, 4.0, "a b c d e f g h", turns, default="Remote")
+    speakers = {p.speaker for p in pieces}
+    assert speakers == {"S2", "S3"}
+    assert sum(len(p.text.split()) for p in pieces) == 8
+
+
+def test_is_repeat_flags_overlapping_same_words():
+    # same utterance re-emitted by the neighbouring window: overlaps in time, shares words
+    assert is_repeat(66.0, 68.0, "okay so mid day", 67.5, 69.0, "okay so mid day then")
+
+
+def test_is_repeat_ignores_same_words_at_a_different_time():
+    # a genuine later repeat of the phrase does not overlap in time -> not a duplicate
+    assert not is_repeat(10.0, 12.0, "yeah exactly right", 40.0, 42.0, "yeah exactly right")
+
+
+def test_is_repeat_ignores_different_utterances_that_overlap():
+    # the two halves of a straddling utterance differ in words -> both kept
+    assert not is_repeat(66.0, 67.6, "they were fixed", 67.4, 70.0, "okay so mid day")
