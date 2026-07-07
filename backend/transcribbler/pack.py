@@ -101,6 +101,9 @@ def _label_of(speaker: dict) -> str:
     return speaker.get("display_name") or speaker["id"]
 
 
+_FFMPEG_TIMEOUT = 300  # seconds; a slice/transcode of a long session shouldn't hang forever
+
+
 def _to_opus(src: Path, dst: Path) -> bool:
     """Transcode ``src`` → opus at ``dst``. Returns False if the encoder is unavailable.
 
@@ -112,11 +115,76 @@ def _to_opus(src: Path, dst: Path) -> bool:
         subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
              "-c:a", "libopus", "-b:a", "24k", str(dst)],
-            check=True,
+            check=True, timeout=_FFMPEG_TIMEOUT,
         )
         return True
     except subprocess.CalledProcessError:
         return False
+
+
+def _coalesce(spans: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Merge overlapping/touching spans (sorted) so the select expression stays compact."""
+    merged: list[tuple[float, float]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _slice_channel(session_wav: Path, spans: list[tuple[float, float]], channel: int, dst: Path) -> None:
+    """Slice ``spans`` (seconds) from one ``channel`` of a stereo wav → concatenated ``dst``.
+
+    One ffmpeg pass: pan the channel to mono, ``asplit`` it per span, ``atrim`` each span (PTS
+    reset), then ``concat``. This is *temporal* isolation — each clip holds only that speaker's
+    speaking spans (the operator from the mic channel, a remote from the meeting channel by its
+    diarized turns), a clean, sample-accurate voiceprint exemplar. Overlapping spans are
+    coalesced first, and the graph is passed via ``-filter_complex_script`` (a file, not argv)
+    so a long meeting's hundreds of turns can't blow the argv length limit (~500 spans inline).
+    """
+    merged = _coalesce(spans)
+    n = len(merged)
+    splits = "".join(f"[m{i}]" for i in range(n))
+    graph = [f"[0:a]pan=mono|c0=c{channel},asplit={n}{splits}"]
+    for i, (start, end) in enumerate(merged):
+        graph.append(f"[m{i}]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{i}]")
+    graph.append("".join(f"[a{i}]" for i in range(n)) + f"concat=n={n}:v=0:a=1[o]")
+
+    fd, script = tempfile.mkstemp(suffix=".txt")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(";".join(graph))
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(session_wav),
+             "-filter_complex_script", script, "-map", "[o]", "-ar", "16000", "-ac", "1", str(dst)],
+            check=True, timeout=_FFMPEG_TIMEOUT,
+        )
+    finally:
+        os.unlink(script)
+
+
+def build_speaker_clips(
+    session_wav: Path,
+    spans_by_id: dict[str, list[tuple[float, float]]],
+    channel_by_id: dict[str, int],
+    *,
+    dst_dir: Path,
+) -> dict[str, Path]:
+    """Cut per-speaker isolated clips from a stereo session wav, keyed by canonical id.
+
+    ``spans_by_id`` maps a speaker id (``S0`` …) to its speaking spans; ``channel_by_id``
+    picks that speaker's source channel (mic vs meeting). Speakers with no spans are skipped.
+    Returns ``{id: clip_wav}`` — ready to hand to :func:`write_pack` as its ``audio`` map.
+    """
+    clips: dict[str, Path] = {}
+    for sid, spans in spans_by_id.items():
+        if not spans:
+            continue
+        dst = dst_dir / f"{sid}.wav"
+        _slice_channel(session_wav, spans, channel_by_id.get(sid, 1), dst)
+        clips[sid] = dst
+    return clips
 
 
 def _normalize(info: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -148,6 +216,7 @@ def write_pack(
     start_s: int = 0,
     uid: str | None = None,
     dest_dir: Path | None = None,
+    md_path: Path | None = None,
 ) -> PackResult:
     """Write one session pack: the loose ``.md`` sidecar + the self-describing blob.
 
@@ -156,6 +225,10 @@ def write_pack(
     keyed by the collision-free canonical id (not the display label, which two speakers can
     share), opus when the encoder is present else the source codec. The pack is written
     **active** (audio present).
+
+    ``md_path`` pins the loose sidecar to an explicit path (e.g. the operator's ``-o``
+    transcript) instead of deriving+disambiguating one under ``dest_dir``; the blob still
+    lands beside it in ``dest_dir``.
     """
     started = started or datetime.now(timezone.utc)
     uid = uid or new_uid()
@@ -202,12 +275,14 @@ def write_pack(
     finally:
         Path(tmp).unlink(missing_ok=True)
 
-    # Loose sidecar written last, once the blob is durable. Disambiguate on a same-day +
-    # same-title collision (the common case for repeated enrollment of one person) so a new
-    # pack's .md can't overwrite a prior one and orphan its blob from loose-file discovery.
-    md_path = dest / f"{started:%Y-%m-%d}-{slug(title)}.md"
-    if md_path.exists():
-        md_path = dest / f"{started:%Y-%m-%d}-{slug(title)}-{uid}.md"
+    # Loose sidecar written last, once the blob is durable. When not pinned to an explicit
+    # path, derive one and disambiguate on a same-day + same-title collision (the common case
+    # for repeated enrollment of one person) so a new pack's .md can't overwrite a prior one
+    # and orphan its blob from loose-file discovery.
+    if md_path is None:
+        md_path = dest / f"{started:%Y-%m-%d}-{slug(title)}.md"
+        if md_path.exists():
+            md_path = dest / f"{started:%Y-%m-%d}-{slug(title)}-{uid}.md"
     md_path.write_text(sidecar)
 
     return PackResult(uid=uid, md_path=md_path, blob_path=blob_path)
@@ -243,7 +318,10 @@ def extract(blob_path: Path) -> list[library.Voiceprint]:
 
     pack_uid = embed_doc["pack_uid"]
     names = {s["id"]: _label_of(s) for s in ir["speakers"]}
-    source_ref = f"../sessions/{blob_path.name}"
+    # Back-reference is a path relative to the library dir (where the voiceprint lives) → the
+    # blob's ACTUAL location, so it resolves whether the pack sits in the canonical sessions
+    # store or beside an operator's ``-o`` transcript (spec §9 relative-link convention).
+    source_ref = os.path.relpath(blob_path.resolve(), paths.library_dir())
 
     updates: list[library.Voiceprint] = []
     for sid, vector in embed_doc["vectors"].items():

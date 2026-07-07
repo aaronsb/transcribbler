@@ -208,3 +208,11 @@ class SessionGallery:
     @property
     def speaker_count(self) -> int:
         return len(self._speakers)
+
+    def centroids(self) -> dict[str, list[float]]:
+        """The per-speaker running-mean centroid by sid — the session's voiceprint seed.
+
+        Only matchable speakers (those minted with an embedding) appear; ghost ``mint(None)``
+        ids have no centroid. Used to seed a session pack's embeddings for durable extraction.
+        """
+        return {sid: list(sp.centroid) for sid, sp in self._by_sid.items()}
