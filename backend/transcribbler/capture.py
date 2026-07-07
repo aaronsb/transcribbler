@@ -28,6 +28,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from .attribution import Attributed, split_segment_by_turns
 from .cores import asr_core
 from .diarizer_daemon import DiarizerDaemon
 from .profiles import Profile
@@ -217,58 +218,117 @@ def _mean_db_file(wav: Path) -> float:
     return float(m.group(1)) if m else -120.0
 
 
-def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
-    return max(0.0, min(a1, b1) - max(a0, b0))
+def _concat(chunks: list[Path], dst: Path) -> Path:
+    """Concatenate same-format stereo chunks into one wav (pass a single through)."""
+    if len(chunks) == 1:
+        return chunks[0]
+    inputs: list[str] = []
+    for p in chunks:
+        inputs += ["-i", str(p)]
+    streams = "".join(f"[{i}:a]" for i in range(len(chunks)))
+    fc = f"{streams}concat=n={len(chunks)}:v=0:a=1[o]"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs,
+         "-filter_complex", fc, "-map", "[o]", str(dst)],
+        check=True, timeout=_FFMPEG_OP_TIMEOUT,
+    )
+    return dst
 
 
-def _transcribe_chunk(
-    chunk: Path, offset_s: float, profile: Profile, workdir: Path,
+def _window_plan(
+    k: int, *, contiguous: bool, terminal: bool, segment_s: int
+) -> tuple[list[int], float, float, float, tuple[float, float]]:
+    """Chunk indices, window start, emit region and shared span for window ``k``.
+
+    An interior window spans chunks ``[k-1, k]`` and is *centered* on the chunk
+    boundary ``k*segment_s`` — so that boundary is interior to the window and words
+    across it decode with context on both sides. Its emit region is the middle
+    ``segment_s`` seconds ``[k*seg - half, k*seg + half)``; adjacent windows' emit
+    regions tile exactly. A non-contiguous window (cold start or after a gap) has no
+    left neighbour, so it is a single chunk emitting from its own start. A terminal
+    window (final drain) extends its emit region to the end of its audio.
+    """
+    half = segment_s / 2
+    if contiguous:
+        chunks_idx = [k - 1, k]
+        win_start = (k - 1) * segment_s
+        emit_lo = k * segment_s - half
+        shared = (float(win_start), float(win_start + segment_s))  # chunk k-1, shared with prev
+    else:
+        chunks_idx = [k]
+        win_start = k * segment_s
+        emit_lo = float(win_start)
+        shared = (0.0, 0.0)
+    emit_hi = float((k + 1) * segment_s) if terminal else k * segment_s + half
+    return chunks_idx, float(win_start), emit_lo, emit_hi, shared
+
+
+def _transcribe_window(
+    window_wav: Path, win_start: float, emit_lo: float, emit_hi: float,
+    profile: Profile, workdir: Path,
     *, daemon: DiarizerDaemon | None, gallery: SessionGallery | None,
+    prev_sid_turns: list[tuple[float, float, str]], shared_span: tuple[float, float],
     gate_db: float, operator_label: str, say: Log,
-) -> list[Turn]:
-    """Two-channel transcription of one chunk → absolute-timed turns.
+) -> tuple[list[Turn], list[tuple[float, float, str]]]:
+    """Transcribe one overlapping window; emit only turns in ``[emit_lo, emit_hi)``.
 
-    Operator channel → ASR labeled by channel. Meeting channel → ASR; if a diarizer
-    daemon is given, each ASR segment is attributed to the *session-stable* speaker
-    id (via the gallery) whose diarized turn overlaps it most. Without a daemon, all
-    remote speech collapses to a single ``Remote`` bucket.
+    ASR runs on the whole window so words near the emit edges have context on both
+    sides, but a segment is emitted only when its start falls in the emit region —
+    the overlap with neighbouring windows is decoding context, not output, so nothing
+    double-emits. The meeting channel is diarized over the whole window; labels are
+    linked to session ids by ``gallery.assign_window`` (temporal-first, ADR-0027) and
+    each emitted segment is split at speaker-change boundaries (Decision 2a).
+
+    Returns ``(emitted turns, this window's meeting sid-turns)`` — the sid-turns
+    (absolute seconds) become the next window's ``prev_sid_turns``.
     """
     asr = asr_core(profile.asr)
     turns: list[Turn] = []
 
-    # operator channel: ASR only, gated so whisper doesn't hallucinate on silence
-    mic_wav = _split_channel(chunk, workdir / "mic.wav", 0)
+    def _owned(seg) -> bool:
+        return emit_lo <= win_start + seg.start < emit_hi
+
+    # operator channel (mic = channel 0): identified by channel, no diarization
+    mic_wav = _split_channel(window_wav, workdir / "mic.wav", 0)
     if _mean_db_file(mic_wav) >= gate_db:
         for s in asr.transcribe(mic_wav):
-            if s.text.strip():
-                turns.append(Turn(offset_s + s.start, offset_s + s.end, operator_label, s.text.strip()))
+            if s.text.strip() and _owned(s):
+                turns.append(Turn(win_start + s.start, win_start + s.end, operator_label, s.text.strip()))
 
-    # meeting channel: ASR, then attribute each segment to a session-stable speaker
-    mtg_wav = _split_channel(chunk, workdir / "meeting.wav", 1)
+    # meeting channel (channel 1): ASR, diarize the whole window, link, split-attribute
+    mtg_wav = _split_channel(window_wav, workdir / "meeting.wav", 1)
+    sid_turns: list[tuple[float, float, str]] = []
     if _mean_db_file(mtg_wav) >= gate_db:
         segs = [s for s in asr.transcribe(mtg_wav) if s.text.strip()]
-        stitched: list[tuple[float, float, str]] | None = None
         if daemon is not None and gallery is not None and segs:
             try:
                 res = daemon.diarize(mtg_wav)
-                mapping = gallery.assign_chunk(res.get("speakers", []))
-                stitched = [
-                    (t["start"], t["end"], mapping.get(t["label"], "Remote"))
+                local_turns = [
+                    (win_start + t["start"], win_start + t["end"], t["label"])
                     for t in res.get("turns", [])
                 ]
+                mapping = gallery.assign_window(
+                    res.get("speakers", []), local_turns, prev_sid_turns, shared_span
+                )
+                sid_turns = [(a0, a1, mapping.get(lbl, "Remote")) for a0, a1, lbl in local_turns]
             except Exception as e:  # daemon flaked — degrade to one remote bucket
                 say(f"  (diarize failed, remote→one speaker: {e})")
-                stitched = None
+                sid_turns = []
         for s in segs:
-            label = "Remote"
-            if stitched:
-                best = max(stitched, key=lambda t: _overlap(s.start, s.end, t[0], t[1]), default=None)
-                if best is not None and _overlap(s.start, s.end, best[0], best[1]) > 0.0:
-                    label = best[2]
-            turns.append(Turn(offset_s + s.start, offset_s + s.end, label, s.text.strip()))
+            if not _owned(s):
+                continue  # context region — owned by a neighbouring window
+            a0, a1 = win_start + s.start, win_start + s.end
+            text = s.text.strip()
+            pieces = (
+                split_segment_by_turns(a0, a1, text, sid_turns, default="Remote")
+                if sid_turns
+                else [Attributed(a0, a1, "Remote", text)]
+            )
+            for p in pieces:
+                turns.append(Turn(p.start, p.end, p.speaker, p.text))
 
     turns.sort(key=lambda t: t.start)
-    return turns
+    return turns, sid_turns
 
 
 def _fmt_ts(sec: float) -> str:
@@ -298,7 +358,9 @@ def run_capture(
 ) -> None:
     """Capture live audio and append a rolling transcript to ``out_path``.
 
-    Runs until interrupted (Ctrl-C). Chunk N is transcribed once chunk N+1 opens.
+    Runs until interrupted (Ctrl-C). Window N (chunks N-1..N) is transcribed once
+    chunk N+1 opens; overlapping windows give ASR context and stable speaker
+    linking (ADR-0027).
     """
     say = log or (lambda _m: None)
     work = workdir or (out_path.parent / f".{out_path.stem}.capture")
@@ -324,6 +386,8 @@ def run_capture(
     proc = None
     ff_log = None
     processed: set[int] = set()
+    prev_sid_turns: list[tuple[float, float, str]] = []
+    last_k = -2  # last window index emitted; -2 so window 0 reads as non-contiguous
 
     def _chunk_indices() -> list[int]:
         idx = []
@@ -334,22 +398,37 @@ def run_capture(
                 pass  # ignore anything that isn't chunk_NNNNN.wav
         return sorted(idx)
 
-    def _process(n: int) -> None:
-        nonlocal daemon
+    def _process(k: int, *, terminal: bool = False) -> None:
+        nonlocal daemon, prev_sid_turns, last_k
         if daemon is not None and not daemon.is_alive():
             say("  diarizer stopped — remaining audio → single 'Remote' speaker")
             daemon.close()
-            daemon = None  # latch off: stop retrying + logging every chunk
-        chunk = work / f"chunk_{n:05d}.wav"
+            daemon = None  # latch off: stop retrying + logging every window
+
+        contiguous = k == last_k + 1 and k >= 1
+        chunks_idx, win_start, emit_lo, emit_hi, shared = _window_plan(
+            k, contiguous=contiguous, terminal=terminal, segment_s=segment_s
+        )
+        chunk_paths = [work / f"chunk_{i:05d}.wav" for i in chunks_idx]
+        if not all(p.exists() for p in chunk_paths):  # a neighbour was dropped — go fresh
+            contiguous = False
+            chunks_idx, win_start, emit_lo, emit_hi, shared = _window_plan(
+                k, contiguous=False, terminal=terminal, segment_s=segment_s
+            )
+            chunk_paths = [work / f"chunk_{k:05d}.wav"]
+        prev = prev_sid_turns if contiguous else []
+
         t0 = time.monotonic()
         try:
-            turns = _transcribe_chunk(
-                chunk, n * segment_s, profile, work,
-                daemon=daemon, gallery=gallery, gate_db=gate_db,
-                operator_label=operator_label, say=say,
+            window_wav = _concat(chunk_paths, work / "window.wav")
+            turns, sid_turns = _transcribe_window(
+                window_wav, win_start, emit_lo, emit_hi, profile, work,
+                daemon=daemon, gallery=gallery, prev_sid_turns=prev, shared_span=shared,
+                gate_db=gate_db, operator_label=operator_label, say=say,
             )
-        except Exception as e:  # one bad chunk must not kill the whole session
-            say(f"  chunk {n:05d}: skipped ({type(e).__name__}: {e})")
+        except Exception as e:  # one bad window must not kill the whole session
+            say(f"  window {k:05d}: skipped ({type(e).__name__}: {e})")
+            prev_sid_turns = []  # context broken — don't link across the gap
         else:
             dt = time.monotonic() - t0
             for t in turns:
@@ -358,13 +437,17 @@ def run_capture(
                     on_turn(t)
             out.flush()
             if on_chunk is not None:
-                on_chunk(n, len(turns), dt, dt < segment_s)
+                on_chunk(k, len(turns), dt, dt < segment_s)
             else:
-                say(f"  chunk {n:05d}: {len(turns)} turns in {dt:.1f}s "
+                say(f"  window {k:05d}: {len(turns)} turns in {dt:.1f}s "
                     f"({'keeps up' if dt < segment_s else 'LAGS'} vs {segment_s}s)")
+            prev_sid_turns = sid_turns
+            last_k = k
         finally:
-            processed.add(n)
-            chunk.unlink(missing_ok=True)
+            processed.add(k)
+            (work / f"chunk_{k - 1:05d}.wav").unlink(missing_ok=True)  # kept only until now
+            if terminal:
+                (work / f"chunk_{k:05d}.wav").unlink(missing_ok=True)
 
     try:
         out = out_path.open("a")
@@ -410,16 +493,15 @@ def run_capture(
         if ff_log is not None:
             ff_log.close()
         # ffmpeg has exited, so every remaining chunk on disk is finalized — drain
-        # the tail (incl. the last chunk, which never got an N+1 successor).
+        # the tail as windows; the last one is terminal (emits to the end of audio).
         if out is not None:
-            for n in _chunk_indices():
-                if n in processed:
-                    continue
+            remaining = [n for n in _chunk_indices() if n not in processed]
+            for pos, n in enumerate(remaining):
                 if controls is not None and controls.paused:
                     (work / f"chunk_{n:05d}.wav").unlink(missing_ok=True)
-                    processed.add(n)  # quit-while-paused: discard the muted tail, don't transcribe it
+                    processed.add(n)  # quit-while-paused: discard the muted tail
                 else:
-                    _process(n)  # drain uses the daemon, so close it after
+                    _process(n, terminal=(pos == len(remaining) - 1))  # drain uses the daemon
             out.close()
         if daemon is not None:
             daemon.close()
