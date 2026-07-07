@@ -143,7 +143,11 @@ class Turn:
     text: str
 
 
-def _ffmpeg_segmenter(paths: Paths, workdir: Path, segment_s: int) -> subprocess.Popen:
+_FFMPEG_OP_TIMEOUT = 60  # seconds; a per-chunk ffmpeg op hanging longer is dropped
+_MAX_BACKLOG = 8         # unprocessed chunks tolerated before dropping the oldest (disk guard)
+
+
+def _ffmpeg_segmenter(paths: Paths, workdir: Path, segment_s: int, stderr) -> subprocess.Popen:
     """Start ffmpeg capturing mic(L)+meeting(R) into rolling stereo 16k chunks."""
     fc = (
         "[0:a]aresample=16000,pan=mono|c0=c0[m];"
@@ -158,7 +162,9 @@ def _ffmpeg_segmenter(paths: Paths, workdir: Path, segment_s: int) -> subprocess
         "-f", "segment", "-segment_time", str(segment_s), "-reset_timestamps", "1",
         str(workdir / "chunk_%05d.wav"),
     ]
-    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    # stderr goes to a file the caller drains, not a PIPE nobody reads: an unread
+    # PIPE fills the OS buffer (~64KB) on a long capture and blocks ffmpeg silently.
+    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=stderr)
 
 
 def _split_channel(chunk: Path, dst: Path, channel: int) -> Path:
@@ -166,16 +172,19 @@ def _split_channel(chunk: Path, dst: Path, channel: int) -> Path:
     subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(chunk),
          "-af", f"pan=mono|c0=c{channel}", "-ar", "16000", "-ac", "1", str(dst)],
-        check=True,
+        check=True, timeout=_FFMPEG_OP_TIMEOUT,
     )
     return dst
 
 
 def _mean_db_file(wav: Path) -> float:
-    proc = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-i", str(wav), "-af", "volumedetect", "-f", "null", "/dev/null"],
-        capture_output=True, text=True,
-    )
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-i", str(wav), "-af", "volumedetect", "-f", "null", "/dev/null"],
+            capture_output=True, text=True, timeout=_FFMPEG_OP_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return -120.0  # treat a hung probe as silence → chunk gets skipped
     m = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", proc.stderr)
     return float(m.group(1)) if m else -120.0
 
@@ -202,7 +211,7 @@ def _transcribe_chunk(
         if diarize and profile.diar.enabled:
             try:
                 diar = diarizer_core(profile.diar).diarize(mtg_wav)
-                ids, aligned = align(segs, diar)
+                _, aligned = align(segs, diar)
                 for a in aligned:
                     if a.text.strip():
                         turns.append(Turn(offset_s + a.start, offset_s + a.end, a.speaker_id, a.text.strip()))
@@ -255,46 +264,83 @@ def run_capture(
     if meeting:
         paths = Paths(mic=paths.mic, meeting=meeting)
 
-    out = out_path.open("a")
-    out.write(f"# transcript — {profile.name} — segment {segment_s}s\n\n")
-    out.flush()
-
     say(f"capturing → {out_path} (Ctrl-C to stop)")
-    proc = _ffmpeg_segmenter(paths, work, segment_s)
+    out = None
+    proc = None
+    ff_log = None
     processed: set[int] = set()
+
+    def _chunk_indices() -> list[int]:
+        idx = []
+        for p in work.glob("chunk_*.wav"):
+            try:
+                idx.append(int(p.stem.split("_")[1]))
+            except (IndexError, ValueError):
+                pass  # ignore anything that isn't chunk_NNNNN.wav
+        return sorted(idx)
+
+    def _process(n: int) -> None:
+        chunk = work / f"chunk_{n:05d}.wav"
+        t0 = time.monotonic()
+        try:
+            turns = _transcribe_chunk(
+                chunk, n * segment_s, profile, work,
+                diarize=diarize, gate_db=gate_db, operator_label=operator_label, say=say,
+            )
+        except Exception as e:  # one bad chunk must not kill the whole session
+            say(f"  chunk {n:05d}: skipped ({type(e).__name__}: {e})")
+        else:
+            dt = time.monotonic() - t0
+            for t in turns:
+                out.write(f"[{_fmt_ts(t.start)}] {t.speaker}: {t.text}\n")
+            out.flush()
+            say(f"  chunk {n:05d}: {len(turns)} turns in {dt:.1f}s "
+                f"({'keeps up' if dt < segment_s else 'LAGS'} vs {segment_s}s)")
+        finally:
+            processed.add(n)
+            chunk.unlink(missing_ok=True)
+
     try:
+        out = out_path.open("a")
+        out.write(f"# transcript — {profile.name} — segment {segment_s}s\n\n")
+        out.flush()
+        ff_log = (work / "ffmpeg.log").open("wb")
+        proc = _ffmpeg_segmenter(paths, work, segment_s, ff_log)
         while True:
             if proc.poll() is not None:
-                tail = (proc.stderr.read() or b"").decode(errors="replace")[-500:]
+                tail = (work / "ffmpeg.log").read_bytes()[-500:].decode(errors="replace")
                 raise RuntimeError(f"ffmpeg capture exited ({proc.returncode}): {tail}")
-            ready = sorted(
-                int(p.stem.split("_")[1])
-                for p in work.glob("chunk_*.wav")
-            )
-            # a chunk is complete once the *next* one exists
-            complete = [n for n in ready if (n + 1) in ready and n not in processed]
-            for n in complete:
-                chunk = work / f"chunk_{n:05d}.wav"
-                t0 = time.monotonic()
-                turns = _transcribe_chunk(
-                    chunk, n * segment_s, profile, work,
-                    diarize=diarize, gate_db=gate_db, operator_label=operator_label, say=say,
-                )
-                dt = time.monotonic() - t0
-                for t in turns:
-                    out.write(f"[{_fmt_ts(t.start)}] {t.speaker}: {t.text}\n")
-                out.flush()
-                say(f"  chunk {n:05d}: {len(turns)} turns in {dt:.1f}s "
-                    f"({'keeps up' if dt < segment_s else 'LAGS'} vs {segment_s}s)")
-                processed.add(n)
-                chunk.unlink(missing_ok=True)
+            ready = _chunk_indices()
+            # backlog guard: if transcription can't keep up, drop the oldest
+            # unprocessed chunks (loudly) rather than filling the disk.
+            backlog = [n for n in ready if n not in processed]
+            if len(backlog) > _MAX_BACKLOG:
+                for n in backlog[:-_MAX_BACKLOG]:
+                    (work / f"chunk_{n:05d}.wav").unlink(missing_ok=True)
+                    processed.add(n)
+                say(f"  backlog > {_MAX_BACKLOG}: dropped {len(backlog) - _MAX_BACKLOG} old chunk(s)")
+                ready = _chunk_indices()
+            # a chunk is complete once the *next* one exists (ffmpeg finalizes N's
+            # header before opening N+1)
+            for n in [n for n in ready if (n + 1) in ready and n not in processed]:
+                _process(n)
             time.sleep(1.0)
     except KeyboardInterrupt:
         say("\nstopping…")
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        out.close()
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        if ff_log is not None:
+            ff_log.close()
+        # ffmpeg has exited, so every remaining chunk on disk is finalized — drain
+        # the tail (incl. the last chunk, which never got an N+1 successor).
+        if out is not None:
+            for n in _chunk_indices():
+                if n not in processed:
+                    _process(n)
+            out.close()

@@ -26,6 +26,7 @@ The HF token is read from HF_TOKEN. Diagnostics go to stderr so stdout stays pur
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -73,13 +74,14 @@ def load_pipeline(model: str, token: str):
 
     set_telemetry_metrics(False)  # don't phone home about a private audio pipeline
 
-    pipeline = Pipeline.from_pretrained(model, token=token)
-    if pipeline is None:
-        raise RuntimeError(f"could not load pipeline {model!r} (gated model not accepted?)")
-
-    # ROCm builds of torch report as CUDA (HIP masquerades as the cuda API).
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    pipeline.to(torch.device(device))
+    # Keep model-load chatter off stdout so it can't corrupt the JSON protocol.
+    with contextlib.redirect_stdout(sys.stderr):
+        pipeline = Pipeline.from_pretrained(model, token=token)
+        if pipeline is None:
+            raise RuntimeError(f"could not load pipeline {model!r} (gated model not accepted?)")
+        # ROCm builds of torch report as CUDA (HIP masquerades as the cuda API).
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        pipeline.to(torch.device(device))
     return pipeline, device
 
 
@@ -91,6 +93,8 @@ def _embedding_row(speaker_embeddings, s: int) -> list[float] | None:
     vals = [float(x) for x in row]
     if not vals or any(math.isnan(v) or math.isinf(v) for v in vals):
         return None
+    if not any(v != 0.0 for v in vals):
+        return None  # pyannote zero-pads "extra" speakers — a zero vector isn't a voiceprint
     return [round(v, 6) for v in vals]
 
 
@@ -106,11 +110,14 @@ def diarize_file(pipeline, device: str, audio_path: str, *, progress: bool = Fal
     waveform = waveform.unsqueeze(0) if waveform.ndim == 1 else waveform.T  # (channel, time)
     inputs = {"waveform": waveform, "sample_rate": sample_rate}
 
-    if progress:
-        with _ProgressToStderr() as hook:
-            output = pipeline(inputs, hook=hook)
-    else:
-        output = pipeline(inputs)
+    # Redirect stdout→stderr during inference: a stray library print to stdout would
+    # corrupt the JSON-lines protocol the parent reads.
+    with contextlib.redirect_stdout(sys.stderr):
+        if progress:
+            with _ProgressToStderr() as hook:
+                output = pipeline(inputs, hook=hook)
+        else:
+            output = pipeline(inputs)
 
     # pyannote 4.x returns DiarizeOutput; .speaker_diarization is the full Annotation
     # (keeps overlapping turns, so our alignment can flag secondary speakers).
@@ -120,7 +127,9 @@ def diarize_file(pipeline, device: str, audio_path: str, *, progress: bool = Fal
         for segment, _, speaker in annotation.itertracks(yield_label=True)
     ]
 
-    # community-1 returns one embedding per speaker, row-aligned with .labels() order.
+    # pyannote re-orders speaker_embeddings so row s matches speaker_diarization.labels()[s]
+    # ("re-order centroids so that they match the order given by diarization.labels()" in
+    # speaker_diarization.py), so enumerate(labels()) is the correct, guaranteed pairing.
     speaker_embeddings = getattr(output, "speaker_embeddings", None)
     speakers = [
         {"label": str(speaker), "embedding": _embedding_row(speaker_embeddings, s)}
@@ -142,9 +151,12 @@ def _serve(pipeline, device: str) -> int:
             result = diarize_file(pipeline, device, path)
         except Exception as e:  # one bad chunk must not kill the daemon
             result = {"error": f"{type(e).__name__}: {e}"}
-        json.dump(result, sys.stdout)
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+        try:
+            json.dump(result, sys.stdout)
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        except BrokenPipeError:  # parent went away mid-response — shut down quietly
+            break
     return 0
 
 
