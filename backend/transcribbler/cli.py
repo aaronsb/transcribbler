@@ -83,6 +83,8 @@ def _cmd_capture(args: argparse.Namespace) -> int:
         segment_s=args.segment,
         diarize=not args.no_diarize,
         threshold=args.threshold,
+        bleed_reject_db=args.bleed_reject_db,
+        denoise=args.denoise,
         log=lambda m: print(m, file=sys.stderr),
     )
     return 0
@@ -248,6 +250,8 @@ def _cmd_listen(args: argparse.Namespace) -> int:
             segment_s=args.segment,
             diarize=not args.no_diarize,
             threshold=args.threshold,
+            bleed_reject_db=args.bleed_reject_db,
+            denoise=args.denoise,
             on_turn=on_turn,
             on_chunk=on_chunk,
             on_new_speaker=on_new_speaker,
@@ -336,6 +340,15 @@ def main(argv: list[str] | None = None) -> int:
         "--threshold", type=float, default=0.5,
         help="voiceprint cosine match threshold for session-stable speakers (default: 0.5)",
     )
+    c.add_argument(
+        "--bleed-reject-db", type=float, default=6.0,
+        help="reject a mic segment as speaker bleed when the meeting channel is louder than the "
+             "mic by more than this many dB over its span (default: 6.0; 120 effectively disables)",
+    )
+    c.add_argument(
+        "--denoise", action="store_true",
+        help="spectral-denoise the meeting channel before ASR (experimental; may not help)",
+    )
     c.set_defaults(func=_cmd_capture)
 
     ls = sub.add_parser(
@@ -354,6 +367,16 @@ def main(argv: list[str] | None = None) -> int:
     ls.add_argument("--no-diarize", action="store_true", help="skip remote-speaker diarization")
     ls.add_argument(
         "--threshold", type=float, default=0.5, help="voiceprint match threshold (default: 0.5)"
+    )
+    ls.add_argument(
+        "--bleed-reject-db", type=float, default=6.0,
+        help="reject a mic segment as speaker bleed when the meeting channel is louder than the "
+             "mic by more than this many dB over its span (default: 6.0; raise to reject less, "
+             "120 effectively disables)",
+    )
+    ls.add_argument(
+        "--denoise", action="store_true",
+        help="spectral-denoise the meeting channel before ASR (experimental; may not help)",
     )
     ls.set_defaults(func=_cmd_listen)
 
