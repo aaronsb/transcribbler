@@ -298,9 +298,10 @@ def _dominant_embedding(res: dict) -> list[float] | None:
 def _cmd_enroll(args: argparse.Namespace) -> int:
     import subprocess
 
-    from . import library, paths
+    from . import library, pack, paths
     from .capture import detect_paths
     from .diarizer_daemon import DiarizerDaemon
+    from .ir import build_live_ir
     from .session_gallery import cosine
 
     try:
@@ -348,8 +349,30 @@ def _cmd_enroll(args: argparse.Namespace) -> int:
     if prior is not None:
         sim = cosine(emb, prior.centroid)
         print(f"  match to your existing print: cosine {sim:.3f}  (1.0 = identical, >0.5 = same voice)")
-    vp = library.enroll(args.name, emb)
-    print(f"\n✓ enrolled {vp.name!r} — uid {vp.uid}, {vp.samples} sample(s) → {paths.library_dir()}\n")
+
+    # An enrollment is not a special format — it's a single-speaker session pack tagged for
+    # training (session-pack spec §1). Build the IR (the read passage as one turn), write a
+    # real pack (record.ir.json + audio/ clip + embedding sidecar), then extract the
+    # voiceprint FROM the pack — the same universal path any capture will use.
+    ir = build_live_ir(
+        [(0.0, float(args.seconds), args.name, _ENROLL_PASSAGE)],
+        profile,
+        duration_s=float(args.seconds),
+        operator_label=args.name,
+        diarized=True,
+    )
+    sid = ir["speakers"][0]["id"]
+    result = pack.write_pack(
+        ir,
+        title=f"{args.name} enrollment",
+        tags=["enrollment", "training"],
+        embeddings={sid: emb},
+        audio={sid: wav},
+    )
+    vp = pack.extract(result.blob_path)[0]
+    print(f"\n✓ enrolled {vp.name!r} — voiceprint {vp.uid}, {vp.samples} sample(s)")
+    print(f"  pack → {result.md_path}")
+    print(f"  blob → {result.blob_path.name}\n")
     return 0
 
 
