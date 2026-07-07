@@ -27,12 +27,21 @@ _MEETING_CHANNEL = 1
 TurnTuple = tuple[float, float, str, str]  # (start, end, speaker_label, text)
 
 
+_ASSEMBLE_TIMEOUT = 300  # seconds; assembling a long session shouldn't hang the drain forever
+
+
+def _concat_quote(path: Path) -> str:
+    """Single-quote a path for an ffmpeg concat list, escaping any literal quote as ``'\\''``."""
+    escaped = str(path.resolve()).replace("'", "'\\''")
+    return f"'{escaped}'"
+
+
 def _silence(segment_s: int, dst: Path) -> Path:
     subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
          "-i", "anullsrc=channel_layout=stereo:sample_rate=16000", "-t", str(segment_s),
          "-c:a", "pcm_s16le", str(dst)],
-        check=True,
+        check=True, timeout=_ASSEMBLE_TIMEOUT,
     )
     return dst
 
@@ -43,6 +52,10 @@ def assemble_session(retain_dir: Path, segment_s: int, dst: Path) -> Path | None
     Chunks are placed at their index offset with any *interior* gap (a chunk dropped by the
     backlog guard or muted while paused) filled by ``segment_s`` of silence, so absolute turn
     timestamps still line up with the assembled audio for slicing.
+
+    Uses ffmpeg's **concat demuxer** (a list file) rather than an N-input filtergraph, so a
+    multi-hour capture's ~hundreds of chunks concatenate in one bounded, timeout-guarded pass
+    without an argv/filtergraph explosion.
     """
     kept = {}
     for p in retain_dir.glob("chunk_*.wav"):
@@ -62,21 +75,13 @@ def assemble_session(retain_dir: Path, segment_s: int, dst: Path) -> Path | None
             if silence is None:
                 silence = _silence(segment_s, retain_dir / "_gap.wav")
             parts.append(silence)
-    return _concat(parts, dst)
 
-
-def _concat(parts: list[Path], dst: Path) -> Path:
-    if len(parts) == 1:
-        return parts[0]
-    inputs: list[str] = []
-    for p in parts:
-        inputs += ["-i", str(p)]
-    streams = "".join(f"[{i}:a]" for i in range(len(parts)))
+    listing = retain_dir / "_concat.txt"
+    listing.write_text("".join(f"file {_concat_quote(p)}\n" for p in parts))
     subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs,
-         "-filter_complex", f"{streams}concat=n={len(parts)}:v=0:a=1[o]", "-map", "[o]",
-         "-ar", "16000", "-ac", "2", str(dst)],
-        check=True,
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
+         "-i", str(listing), "-ar", "16000", "-ac", "2", "-c:a", "pcm_s16le", str(dst)],
+        check=True, timeout=_ASSEMBLE_TIMEOUT,
     )
     return dst
 
@@ -108,9 +113,14 @@ def persist_session_pack(
     )
     ids = [s["id"] for s in ir["speakers"]]
     label_by_id = {s["id"]: (s.get("display_name") or s["id"]) for s in ir["speakers"]}
+    id_by_label = {label: sid for sid, label in label_by_id.items()}
 
-    # embeddings: only speakers that both diarized (have a centroid) and reached the transcript
-    embeddings = {sid: centroids[sid] for sid in ids if sid in centroids}
+    # A gallery centroid is keyed by the speaker's LABEL (its gallery sid, e.g. "S1"). Attach it
+    # to the IR speaker with that exact label — NOT by assuming the gallery sid equals the IR id,
+    # which build_live_ir's free-id remap can violate (it may hand a silent gallery id like "S1"
+    # to the "Remote"/"You" bucket), folding the wrong person's voiceprint. A centroid whose label
+    # never reached the transcript is dropped rather than mis-attributed.
+    embeddings = {id_by_label[label]: vec for label, vec in centroids.items() if label in id_by_label}
 
     clips: dict[str, Path] = {}
     if session_wav is not None:

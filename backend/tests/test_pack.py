@@ -246,6 +246,41 @@ def test_write_pack_honours_explicit_md_path(tmp_path, monkeypatch):
     assert result.blob_path.parent == tmp_path and result.blob_path.exists()  # blob beside it
 
 
+def test_extract_source_ref_resolves_from_non_sessions_dir(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    from transcribbler import paths
+    notes = tmp_path / "notes"  # an operator -o location outside the canonical sessions store
+    notes.mkdir()
+    ir = _enrollment_ir("Priya")
+    sid = ir["speakers"][0]["id"]
+    result = pack.write_pack(
+        ir, title="standup", tags=["meeting"], embeddings={sid: [1.0, 0.0, 0.0]},
+        audio={}, started=STARTED, dest_dir=notes, md_path=notes / "standup.md",
+    )
+    vp = pack.extract(result.blob_path)[0]
+    resolved = (paths.library_dir() / vp.sources[0]).resolve()  # relative to the voiceprint's dir
+    assert resolved == result.blob_path.resolve()  # back-ref resolves to the real blob
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required to slice audio")
+def test_build_speaker_clips_handles_many_spans(tmp_path):
+    import subprocess
+
+    stereo = tmp_path / "session.wav"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "sine=frequency=300:duration=60",
+         "-f", "lavfi", "-i", "sine=frequency=600:duration=60",
+         "-filter_complex", "[0:a][1:a]join=inputs=2:channel_layout=stereo[o]",
+         "-map", "[o]", "-ar", "16000", str(stereo)],
+        check=True,
+    )
+    spans = [(float(i), i + 0.3) for i in range(120)]  # many short spans — must not blow up
+    clips = pack.build_speaker_clips(stereo, {"S1": spans}, {"S1": 1}, dst_dir=tmp_path)
+    assert clips["S1"].exists()
+    assert _ffprobe_dur(clips["S1"]) > 0  # aselect kept ~0.3s × 120 spans, one filter node
+
+
 def _ffprobe_dur(wav: Path) -> float:
     import subprocess
     out = subprocess.run(

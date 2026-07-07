@@ -101,6 +101,9 @@ def _label_of(speaker: dict) -> str:
     return speaker.get("display_name") or speaker["id"]
 
 
+_FFMPEG_TIMEOUT = 300  # seconds; a slice/transcode of a long session shouldn't hang forever
+
+
 def _to_opus(src: Path, dst: Path) -> bool:
     """Transcode ``src`` → opus at ``dst``. Returns False if the encoder is unavailable.
 
@@ -112,33 +115,53 @@ def _to_opus(src: Path, dst: Path) -> bool:
         subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
              "-c:a", "libopus", "-b:a", "24k", str(dst)],
-            check=True,
+            check=True, timeout=_FFMPEG_TIMEOUT,
         )
         return True
     except subprocess.CalledProcessError:
         return False
 
 
+def _coalesce(spans: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Merge overlapping/touching spans (sorted) so the select expression stays compact."""
+    merged: list[tuple[float, float]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 def _slice_channel(session_wav: Path, spans: list[tuple[float, float]], channel: int, dst: Path) -> None:
     """Slice ``spans`` (seconds) from one ``channel`` of a stereo wav → concatenated ``dst``.
 
-    One ffmpeg pass: pan the chosen channel to mono, split it per span, trim each span with
-    its PTS reset, then concat. This is *temporal* isolation — each clip contains only that
-    speaker's speaking spans (the operator from the mic channel, a remote from the meeting
-    channel by its diarized turns), which is what makes the clip a clean voiceprint exemplar.
+    One ffmpeg pass: pan the channel to mono, ``asplit`` it per span, ``atrim`` each span (PTS
+    reset), then ``concat``. This is *temporal* isolation — each clip holds only that speaker's
+    speaking spans (the operator from the mic channel, a remote from the meeting channel by its
+    diarized turns), a clean, sample-accurate voiceprint exemplar. Overlapping spans are
+    coalesced first, and the graph is passed via ``-filter_complex_script`` (a file, not argv)
+    so a long meeting's hundreds of turns can't blow the argv length limit (~500 spans inline).
     """
-    n = len(spans)
+    merged = _coalesce(spans)
+    n = len(merged)
     splits = "".join(f"[m{i}]" for i in range(n))
     graph = [f"[0:a]pan=mono|c0=c{channel},asplit={n}{splits}"]
-    for i, (start, end) in enumerate(spans):
+    for i, (start, end) in enumerate(merged):
         graph.append(f"[m{i}]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{i}]")
-    trimmed = "".join(f"[a{i}]" for i in range(n))
-    graph.append(f"{trimmed}concat=n={n}:v=0:a=1[o]")
-    subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(session_wav),
-         "-filter_complex", ";".join(graph), "-map", "[o]", "-ar", "16000", "-ac", "1", str(dst)],
-        check=True,
-    )
+    graph.append("".join(f"[a{i}]" for i in range(n)) + f"concat=n={n}:v=0:a=1[o]")
+
+    fd, script = tempfile.mkstemp(suffix=".txt")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(";".join(graph))
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(session_wav),
+             "-filter_complex_script", script, "-map", "[o]", "-ar", "16000", "-ac", "1", str(dst)],
+            check=True, timeout=_FFMPEG_TIMEOUT,
+        )
+    finally:
+        os.unlink(script)
 
 
 def build_speaker_clips(
@@ -295,7 +318,10 @@ def extract(blob_path: Path) -> list[library.Voiceprint]:
 
     pack_uid = embed_doc["pack_uid"]
     names = {s["id"]: _label_of(s) for s in ir["speakers"]}
-    source_ref = f"../sessions/{blob_path.name}"
+    # Back-reference is a path relative to the library dir (where the voiceprint lives) → the
+    # blob's ACTUAL location, so it resolves whether the pack sits in the canonical sessions
+    # store or beside an operator's ``-o`` transcript (spec §9 relative-link convention).
+    source_ref = os.path.relpath(blob_path.resolve(), paths.library_dir())
 
     updates: list[library.Voiceprint] = []
     for sid, vector in embed_doc["vectors"].items():

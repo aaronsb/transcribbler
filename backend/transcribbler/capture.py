@@ -620,9 +620,12 @@ def run_capture(
                         out_path=out_path,
                     )
                     say(f"  session pack → {result.md_path.name} + {result.blob_path.name}")
+                    shutil.rmtree(retain, ignore_errors=True)  # packed → free the raw chunks
                 except Exception as e:
-                    say(f"  (session pack failed, kept raw transcript: {e})")
-                finally:
-                    shutil.rmtree(retain, ignore_errors=True)
+                    # keep retain/ on failure so the session's audio is recoverable, not lost
+                    say(f"  (session pack failed, kept raw transcript; audio at {retain}: {e})")
+            else:
+                # nothing transcribed → no pack; free any retained chunks so disk isn't leaked
+                shutil.rmtree(retain, ignore_errors=True)
         if daemon is not None:
             daemon.close()

@@ -66,6 +66,25 @@ def test_persist_without_audio_still_packs_transcript_and_embeddings(tmp_path, m
     assert pack.extract(result.blob_path)  # embeddings alone prime the library
 
 
+def test_orphan_gallery_centroid_is_not_misattributed(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    # the gallery embedded a remote "S1" whose ASR was empty, so only You/Remote reach the
+    # turns; build_live_ir then hands the free id "S1" to the Remote bucket. The orphan
+    # centroid must NOT ride along and fold the wrong person's voiceprint (review finding #2).
+    turns = [(0.0, 2.0, "You", "morning"), (2.0, 5.0, "Remote", "crosstalk")]
+    out = tmp_path / "standup.md"
+    result = capture_persist.persist_session_pack(
+        turns, PROF, operator_label="You", diarized=True,
+        centroids={"S1": [0.9] + [0.0] * 255}, session_wav=None, out_path=out,
+    )
+    with tarfile.open(result.blob_path, "r:gz") as tar:
+        embed = json.loads(tar.extractfile("embeddings.json").read())
+        ir = json.loads(tar.extractfile("record.ir.json").read())
+    remote_id = next(s["id"] for s in ir["speakers"] if s.get("display_name") == "Remote")
+    assert remote_id == "S1"  # build_live_ir did reuse the orphan gallery id for Remote
+    assert embed["vectors"] == {}  # ...but the centroid was dropped, not folded onto Remote
+
+
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required to slice audio")
 def test_persist_with_audio_cuts_speaker_isolated_clips(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
