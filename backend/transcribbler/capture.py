@@ -21,9 +21,9 @@ system defaults — the meeting is frequently not on the default sink.
 from __future__ import annotations
 
 import array
-import json
 import math
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -31,11 +31,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import render
+from . import capture_persist
 from .attribution import Attributed, is_repeat, split_segment_by_turns
 from .cores import asr_core
 from .diarizer_daemon import DiarizerDaemon
-from .ir import build_live_ir
 from .profiles import Profile
 from .session_gallery import SessionGallery
 
@@ -418,6 +417,7 @@ def run_capture(
     bleed_reject_db: float = 6.0,
     denoise: bool = False,
     operator_label: str = "You",
+    retain_audio: bool = True,
     on_turn: Callable[[Turn], None] | None = None,
     on_chunk: Callable[[int, int, float, bool], None] | None = None,
     on_new_speaker: Callable[[str], None] | None = None,
@@ -435,6 +435,17 @@ def run_capture(
     say = log or (lambda _m: None)
     work = workdir or (out_path.parent / f".{out_path.stem}.capture")
     work.mkdir(parents=True, exist_ok=True)
+    retain = work / "retain"  # processed chunks kept here for the session pack's audio
+    if retain_audio:
+        retain.mkdir(exist_ok=True)
+
+    def _retire(idx: int) -> None:
+        """A processed chunk is done streaming — keep it for the pack, or drop it."""
+        src = work / f"chunk_{idx:05d}.wav"
+        if retain_audio and src.exists():
+            src.replace(retain / f"chunk_{idx:05d}.wav")
+        else:
+            src.unlink(missing_ok=True)
 
     paths = (
         Paths(mic=mic, meeting=meeting)
@@ -532,9 +543,9 @@ def run_capture(
             last_k = k
         finally:
             processed.add(k)
-            (work / f"chunk_{k - 1:05d}.wav").unlink(missing_ok=True)  # kept only until now
+            _retire(k - 1)  # left chunk is done streaming → retain for the pack (or drop)
             if terminal:
-                (work / f"chunk_{k:05d}.wav").unlink(missing_ok=True)
+                _retire(k)
 
     try:
         out = out_path.open("a")
@@ -590,23 +601,28 @@ def run_capture(
                 else:
                     _process(n, terminal=(pos == len(remaining) - 1))  # drain uses the daemon
             out.close()
-            # route the session through the Canonical IR: the record is the source of
-            # truth (schema-validated); the .md is re-rendered from it as a view (ADR-0028).
+            # persist the session as a real pack: the blob's record.ir.json is the schema-
+            # validated source of truth, out_path becomes its .md sidecar, and speaker-isolated
+            # clips + the gallery's centroids seed the durable voiceprint library (ADR-0028).
             if session_turns:
                 try:
-                    ir = build_live_ir(
+                    session_wav = (
+                        capture_persist.assemble_session(retain, segment_s, retain / "session.wav")
+                        if retain_audio else None
+                    )
+                    result = capture_persist.persist_session_pack(
                         [(t.start, t.end, t.speaker, t.text) for t in session_turns],
                         profile,
-                        duration_s=max(t.end for t in session_turns),
                         operator_label=operator_label,
                         diarized=use_diar,
+                        centroids=gallery.centroids() if gallery is not None else {},
+                        session_wav=session_wav,
+                        out_path=out_path,
                     )
-                    ir_path = out_path.parent / f"{out_path.stem}.ir.json"
-                    ir_path.write_text(json.dumps(ir, indent=2))
-                    out_path.write_text(render.to_markdown(ir))
-                    say(f"  session record → {ir_path.name} "
-                        f"({len(ir['turns'])} turns, {len(ir['speakers'])} speakers)")
+                    say(f"  session pack → {result.md_path.name} + {result.blob_path.name}")
                 except Exception as e:
-                    say(f"  (IR record failed, kept raw transcript: {e})")
+                    say(f"  (session pack failed, kept raw transcript: {e})")
+                finally:
+                    shutil.rmtree(retain, ignore_errors=True)
         if daemon is not None:
             daemon.close()

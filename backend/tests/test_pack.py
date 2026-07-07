@@ -7,6 +7,7 @@ import json
 import shutil
 import tarfile
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -230,3 +231,51 @@ def test_extract_rejects_corrupt_json(tmp_path, monkeypatch):
             tar.addfile(info, io.BytesIO(data))
     with pytest.raises(ValueError, match="not an extractable pack"):
         pack.extract(bogus)
+
+
+def test_write_pack_honours_explicit_md_path(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    ir = _enrollment_ir("Priya")
+    sid = ir["speakers"][0]["id"]
+    out = tmp_path / "my-meeting.md"  # the operator's -o transcript path
+    result = pack.write_pack(
+        ir, title="Team standup", tags=["meeting"], embeddings={sid: [1.0, 0.0, 0.0]},
+        audio={}, started=STARTED, dest_dir=tmp_path, md_path=out,
+    )
+    assert result.md_path == out and out.exists()  # sidecar pinned to -o
+    assert result.blob_path.parent == tmp_path and result.blob_path.exists()  # blob beside it
+
+
+def _ffprobe_dur(wav: Path) -> float:
+    import subprocess
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+         "default=nk=1:nw=1", str(wav)],
+        capture_output=True, text=True, check=True,
+    )
+    return float(out.stdout.strip())
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required to slice audio")
+def test_build_speaker_clips_isolates_by_channel_and_spans(tmp_path):
+    import subprocess
+
+    # a 10s stereo wav: distinct tone per channel so a mis-channelled slice would be audible
+    stereo = tmp_path / "session.wav"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "sine=frequency=200:duration=10",
+         "-f", "lavfi", "-i", "sine=frequency=600:duration=10",
+         "-filter_complex", "[0:a][1:a]join=inputs=2:channel_layout=stereo[o]",
+         "-map", "[o]", "-ar", "16000", str(stereo)],
+        check=True,
+    )
+    clips = pack.build_speaker_clips(
+        stereo,
+        spans_by_id={"S0": [(0.0, 2.0), (4.0, 5.0)], "S1": [(6.0, 9.0)], "S2": []},
+        channel_by_id={"S0": 0, "S1": 1},  # S0=mic, S1=meeting
+        dst_dir=tmp_path,
+    )
+    assert set(clips) == {"S0", "S1"}  # S2 (no spans) skipped
+    assert abs(_ffprobe_dur(clips["S0"]) - 3.0) < 0.2  # 2s + 1s of its spans, concatenated
+    assert abs(_ffprobe_dur(clips["S1"]) - 3.0) < 0.2  # its single 3s span

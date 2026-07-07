@@ -119,6 +119,51 @@ def _to_opus(src: Path, dst: Path) -> bool:
         return False
 
 
+def _slice_channel(session_wav: Path, spans: list[tuple[float, float]], channel: int, dst: Path) -> None:
+    """Slice ``spans`` (seconds) from one ``channel`` of a stereo wav → concatenated ``dst``.
+
+    One ffmpeg pass: pan the chosen channel to mono, split it per span, trim each span with
+    its PTS reset, then concat. This is *temporal* isolation — each clip contains only that
+    speaker's speaking spans (the operator from the mic channel, a remote from the meeting
+    channel by its diarized turns), which is what makes the clip a clean voiceprint exemplar.
+    """
+    n = len(spans)
+    splits = "".join(f"[m{i}]" for i in range(n))
+    graph = [f"[0:a]pan=mono|c0=c{channel},asplit={n}{splits}"]
+    for i, (start, end) in enumerate(spans):
+        graph.append(f"[m{i}]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{i}]")
+    trimmed = "".join(f"[a{i}]" for i in range(n))
+    graph.append(f"{trimmed}concat=n={n}:v=0:a=1[o]")
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(session_wav),
+         "-filter_complex", ";".join(graph), "-map", "[o]", "-ar", "16000", "-ac", "1", str(dst)],
+        check=True,
+    )
+
+
+def build_speaker_clips(
+    session_wav: Path,
+    spans_by_id: dict[str, list[tuple[float, float]]],
+    channel_by_id: dict[str, int],
+    *,
+    dst_dir: Path,
+) -> dict[str, Path]:
+    """Cut per-speaker isolated clips from a stereo session wav, keyed by canonical id.
+
+    ``spans_by_id`` maps a speaker id (``S0`` …) to its speaking spans; ``channel_by_id``
+    picks that speaker's source channel (mic vs meeting). Speakers with no spans are skipped.
+    Returns ``{id: clip_wav}`` — ready to hand to :func:`write_pack` as its ``audio`` map.
+    """
+    clips: dict[str, Path] = {}
+    for sid, spans in spans_by_id.items():
+        if not spans:
+            continue
+        dst = dst_dir / f"{sid}.wav"
+        _slice_channel(session_wav, spans, channel_by_id.get(sid, 1), dst)
+        clips[sid] = dst
+    return clips
+
+
 def _normalize(info: tarfile.TarInfo) -> tarfile.TarInfo:
     """Strip mtime/owner from a member so the blob carries no host-identifying metadata.
 
@@ -148,6 +193,7 @@ def write_pack(
     start_s: int = 0,
     uid: str | None = None,
     dest_dir: Path | None = None,
+    md_path: Path | None = None,
 ) -> PackResult:
     """Write one session pack: the loose ``.md`` sidecar + the self-describing blob.
 
@@ -156,6 +202,10 @@ def write_pack(
     keyed by the collision-free canonical id (not the display label, which two speakers can
     share), opus when the encoder is present else the source codec. The pack is written
     **active** (audio present).
+
+    ``md_path`` pins the loose sidecar to an explicit path (e.g. the operator's ``-o``
+    transcript) instead of deriving+disambiguating one under ``dest_dir``; the blob still
+    lands beside it in ``dest_dir``.
     """
     started = started or datetime.now(timezone.utc)
     uid = uid or new_uid()
@@ -202,12 +252,14 @@ def write_pack(
     finally:
         Path(tmp).unlink(missing_ok=True)
 
-    # Loose sidecar written last, once the blob is durable. Disambiguate on a same-day +
-    # same-title collision (the common case for repeated enrollment of one person) so a new
-    # pack's .md can't overwrite a prior one and orphan its blob from loose-file discovery.
-    md_path = dest / f"{started:%Y-%m-%d}-{slug(title)}.md"
-    if md_path.exists():
-        md_path = dest / f"{started:%Y-%m-%d}-{slug(title)}-{uid}.md"
+    # Loose sidecar written last, once the blob is durable. When not pinned to an explicit
+    # path, derive one and disambiguate on a same-day + same-title collision (the common case
+    # for repeated enrollment of one person) so a new pack's .md can't overwrite a prior one
+    # and orphan its blob from loose-file discovery.
+    if md_path is None:
+        md_path = dest / f"{started:%Y-%m-%d}-{slug(title)}.md"
+        if md_path.exists():
+            md_path = dest / f"{started:%Y-%m-%d}-{slug(title)}-{uid}.md"
     md_path.write_text(sidecar)
 
     return PackResult(uid=uid, md_path=md_path, blob_path=blob_path)

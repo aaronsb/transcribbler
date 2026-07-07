@@ -85,6 +85,7 @@ def _cmd_capture(args: argparse.Namespace) -> int:
         threshold=args.threshold,
         bleed_reject_db=args.bleed_reject_db,
         denoise=args.denoise,
+        retain_audio=not args.no_audio,
         log=lambda m: print(m, file=sys.stderr),
     )
     return 0
@@ -252,6 +253,7 @@ def _cmd_listen(args: argparse.Namespace) -> int:
             threshold=args.threshold,
             bleed_reject_db=args.bleed_reject_db,
             denoise=args.denoise,
+            retain_audio=not args.no_audio,
             on_turn=on_turn,
             on_chunk=on_chunk,
             on_new_speaker=on_new_speaker,
@@ -465,6 +467,11 @@ def main(argv: list[str] | None = None) -> int:
         "--denoise", action="store_true",
         help="spectral-denoise the meeting channel before ASR (experimental; may not help)",
     )
+    c.add_argument(
+        "--no-audio", action="store_true",
+        help="don't retain session audio in the pack (smaller; loses re-extract/adjudication "
+             "substrate — the transcript, IR record, and voiceprint embeddings are still packed)",
+    )
     c.set_defaults(func=_cmd_capture)
 
     ls = sub.add_parser(
@@ -493,6 +500,11 @@ def main(argv: list[str] | None = None) -> int:
     ls.add_argument(
         "--denoise", action="store_true",
         help="spectral-denoise the meeting channel before ASR (experimental; may not help)",
+    )
+    ls.add_argument(
+        "--no-audio", action="store_true",
+        help="don't retain session audio in the pack (smaller; loses re-extract/adjudication "
+             "substrate — the transcript, IR record, and voiceprint embeddings are still packed)",
     )
     ls.set_defaults(func=_cmd_listen)
 
