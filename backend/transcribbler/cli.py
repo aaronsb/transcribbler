@@ -178,6 +178,7 @@ class _LiveConsole:
 def _cmd_listen(args: argparse.Namespace) -> int:
     from datetime import datetime
 
+    from . import paths
     from .capture import Controls, run_capture
 
     try:
@@ -190,7 +191,12 @@ def _cmd_listen(args: argparse.Namespace) -> int:
         print(f"error: profile {profile.name!r} has no ASR stage", file=sys.stderr)
         return 2
 
-    out_path = Path(args.output) if args.output else Path(f"transcript-{datetime.now():%Y%m%d-%H%M%S}.md")
+    session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    if args.output:
+        out_path = Path(args.output)
+    else:  # default: a per-session pack dir under XDG data, scratch under XDG state
+        out_path = paths.ensure(paths.sessions_dir() / session_id) / "transcript.md"
+    workdir = paths.ensure(paths.capture_dir() / session_id)
     color = sys.stdout.isatty()
     console = _LiveConsole(fancy=color)
     controls = Controls()
@@ -247,6 +253,7 @@ def _cmd_listen(args: argparse.Namespace) -> int:
             on_new_speaker=on_new_speaker,
             controls=controls,
             banner=False,
+            workdir=workdir,
             log=say,
         )
     except KeyboardInterrupt:
@@ -334,7 +341,11 @@ def main(argv: list[str] | None = None) -> int:
     ls = sub.add_parser(
         "listen", help="live console: transcribe what's playing, print it live, [space]/[q] controls"
     )
-    ls.add_argument("-o", "--output", help="transcript file (default: transcript-YYYYMMDD-HHMMSS.md)")
+    ls.add_argument(
+        "-o", "--output",
+        help="transcript file (default: a per-session pack under XDG data, "
+             "e.g. ~/.local/share/transcribbler/sessions/<id>/transcript.md)",
+    )
     ls.add_argument("-p", "--profile", help="compute profile (auto-selected if omitted)")
     ls.add_argument("--app", default="Google Chrome", help="meeting app to match for path detection")
     ls.add_argument("--mic", help="override: PipeWire source for the operator mic")
