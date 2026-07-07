@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 from . import __version__, env, probe, profiles
@@ -132,18 +133,22 @@ def _key_listener(controls, say) -> None:
 class _LiveConsole:
     """Scrolling transcript above a single in-place status footer (fancy=TTY only).
 
-    Transcript/announce lines scroll; the per-chunk status is pinned to one line
-    that overwrites in place, so the view stays a continuous timestamped session.
-    All writes are guarded: a closed stdout (`listen | head`) latches drawing off
-    instead of raising.
+    Transcript, announces, and notices all scroll via ``line()``; the per-chunk
+    status is pinned to one line (``status()``) that overwrites in place, so the
+    view stays a continuous timestamped session. In fancy mode this is the *single*
+    point through which terminal output passes — routing notices through it too is
+    what keeps the footer from being corrupted by a competing stderr write. A lock
+    guards draws because the key-listener thread also emits notices. All writes are
+    guarded: a closed stdout (`listen | head`) latches drawing off instead of raising.
     """
 
     def __init__(self, fancy: bool):
         self._fancy = fancy
         self._footer = ""
         self._dead = False
+        self._lock = threading.Lock()
 
-    def _write(self, s: str) -> None:
+    def _write(self, s: str) -> None:  # caller holds _lock
         if self._dead:
             return
         try:
@@ -153,22 +158,24 @@ class _LiveConsole:
             self._dead = True  # stdout closed downstream — stop drawing, keep recording
 
     def line(self, text: str) -> None:
-        self._write(("\r\033[K" if self._footer else "") + text + "\n" + self._footer)
+        with self._lock:
+            self._write(("\r\033[K" if self._footer else "") + text + "\n" + self._footer)
 
     def status(self, text: str) -> None:
         if not self._fancy:
             return
-        self._footer = text
-        self._write("\r\033[K" + text)
+        with self._lock:
+            self._footer = text
+            self._write("\r\033[K" + text)
 
     def done(self) -> None:
-        if self._fancy and self._footer:
-            self._write("\n")
-            self._footer = ""
+        with self._lock:
+            if self._fancy and self._footer:
+                self._write("\n")
+                self._footer = ""
 
 
 def _cmd_listen(args: argparse.Namespace) -> int:
-    import threading
     from datetime import datetime
 
     from .capture import Controls, run_capture
@@ -189,7 +196,13 @@ def _cmd_listen(args: argparse.Namespace) -> int:
     controls = Controls()
 
     def say(m: str) -> None:
-        print(m, file=sys.stderr, flush=True)
+        # In fancy mode route notices through the console so they scroll above the
+        # pinned footer instead of colliding with it on stderr; piped mode keeps
+        # notices on stderr so stdout stays a clean transcript.
+        if color:
+            console.line(m)
+        else:
+            print(m, file=sys.stderr, flush=True)
 
     def on_turn(turn) -> None:
         console.line(_fmt_turn(turn, color))
