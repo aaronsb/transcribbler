@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,6 +29,7 @@ class Voiceprint:
     centroid: list[float]  # 256-d running-mean embedding
     samples: int  # embeddings folded in — weights the mean and signals confidence
     updated: str  # ISO-8601 UTC
+    sources: list[str] = field(default_factory=list)  # back-refs to the packs it came from
 
 
 def _now() -> str:
@@ -72,28 +73,62 @@ def save(vp: Voiceprint) -> None:
 
 
 def _fold(centroid: list[float], count: int, emb: list[float]) -> list[float]:
-    """Fold one embedding into a centroid as a running mean (matches SessionGallery)."""
+    """Fold one embedding into a centroid as a running mean (matches SessionGallery).
+
+    Requires matching dimensionality — ``zip`` would otherwise silently truncate to the
+    shorter vector and corrupt the centroid (e.g. folding a new model's differently-sized
+    embedding into an old print, which the enroll docstring flags).
+    """
+    if len(centroid) != len(emb):
+        raise ValueError(f"embedding dim {len(emb)} != centroid dim {len(centroid)}")
     return [(c * count + e) / (count + 1) for c, e in zip(centroid, emb)]
 
 
-def enroll(name: str, embedding: list[float], *, uid: str | None = None) -> Voiceprint:
+def enroll(
+    name: str,
+    embedding: list[float],
+    *,
+    uid: str | None = None,
+    source: str | None = None,
+) -> Voiceprint:
     """Create a named voiceprint, or fold ``embedding`` into an existing one.
 
-    Matching is by ``uid`` if given, else by name. Re-enrolling the same name
-    compounds — the centroid becomes a better estimate of that speaker's cloud and
-    ``samples`` rises, which later serves as a confidence signal.
+    Matching is by name (case-insensitive), falling back to ``uid`` — so re-enrolling the
+    same person from a *new* pack (which carries a fresh ``uid`` seed) still compounds into
+    their one voiceprint rather than minting a duplicate. Compounding makes the centroid a
+    better estimate of that speaker's cloud and raises ``samples`` (a confidence signal).
+
+    ``uid`` seeds the id of a brand-new voiceprint (the pack convention ``<pack_uid>-<name>``,
+    spec §8.2); once set it is stable for that speaker's life. ``source`` is a back-reference
+    to the originating pack, appended (deduped) to the voiceprint's ``sources`` graph edge.
+
+    Folding a ``source`` is **idempotent**: re-extracting a pack already recorded in
+    ``sources`` is a no-op, so ``samples`` (the confidence signal) can't be inflated by a
+    repeated ``extract`` (spec §8.1). Re-embedding a recorded pack under a *new model* is a
+    known v0.1 limitation — it needs per-source replacement, not another fold.
     """
-    existing = load(uid) if uid else find_by_name(name)
+    existing = find_by_name(name) or (load(uid) if uid else None)
     if existing is not None:
+        if source and source in existing.sources:
+            return existing  # already folded this pack — idempotent
+        sources = [*existing.sources, source] if source else existing.sources
         vp = Voiceprint(
             uid=existing.uid,
             name=name,
             centroid=_fold(existing.centroid, existing.samples, embedding),
             samples=existing.samples + 1,
             updated=_now(),
+            sources=sources,
         )
     else:
-        vp = Voiceprint(uid or uuid.uuid4().hex[:12], name, list(embedding), 1, _now())
+        vp = Voiceprint(
+            uid or uuid.uuid4().hex[:12],
+            name,
+            list(embedding),
+            1,
+            _now(),
+            [source] if source else [],
+        )
     save(vp)
     return vp
 
