@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -107,4 +108,67 @@ def build_ir(
         if errors:
             locs = "; ".join(f"{'/'.join(map(str, e.path)) or '<root>'}: {e.message}" for e in errors[:5])
             raise ValueError(f"produced IR fails schema: {locs}")
+    return ir
+
+
+_SID_RE = re.compile(r"S[0-9]+")
+
+
+def build_live_ir(
+    turns: list[tuple[float, float, str, str]],
+    profile: Profile,
+    *,
+    duration_s: float,
+    operator_label: str = "You",
+    diarized: bool = True,
+    validate: bool = True,
+) -> dict:
+    """Assemble a Canonical IR for a *live* capture session (`source.kind = "session"`).
+
+    ``turns`` is a chronological list of ``(start, end, speaker_label, text)``. Live
+    labels are mapped into the canonical ``^S[0-9]+$`` id space (ADR-0006): gallery ids
+    (``S1``, ``S2`` …) keep their id; the operator and the ``Remote`` bucket each take a
+    free ``S`` id with the human label preserved as ``display_name``. Unlike the batch
+    path there is no source file — ``uri``/``sha256`` are omitted, which the schema
+    already permits for ``kind = "session"``.
+
+    (Build-finding for ADR-0028: ``speaker.source`` has no value for operator-by-channel
+    or diarized speakers, so the operator is tagged ``manual`` and remotes ``fallback`` —
+    a candidate schema addition, not decided here.)
+    """
+    labels = list(dict.fromkeys(spk for _, _, spk, _ in turns))  # first-appearance order
+    id_map = {lbl: lbl for lbl in labels if _SID_RE.fullmatch(lbl)}
+    used = set(id_map.values())
+    free = 0
+    for lbl in labels:
+        if lbl in id_map:
+            continue
+        while f"S{free}" in used:
+            free += 1
+        id_map[lbl] = f"S{free}"
+        used.add(f"S{free}")
+
+    speakers = []
+    for lbl in labels:
+        entry: dict = {"id": id_map[lbl], "source": "manual" if lbl == operator_label else "fallback"}
+        if not _SID_RE.fullmatch(lbl):  # preserve the human-meaningful label (You, Remote)
+            entry["display_name"] = lbl
+        speakers.append(entry)
+
+    backend = {"kind": "modular", "asr": f"{profile.asr.engine}:{profile.asr.backend}"}
+    if diarized:
+        backend["diarizer"] = f"{profile.diar.engine}:{profile.diar.backend}"
+
+    ir = {
+        "schema_version": SCHEMA_VERSION,
+        "source": {"kind": "session", "duration_s": round(max(duration_s, 0.001), 3)},
+        "backend": backend,
+        "speakers": speakers,
+        "turns": [
+            {"speaker_id": id_map[spk], "start": round(st, 3), "end": round(en, 3), "text": txt}
+            for st, en, spk, txt in turns
+        ],
+    }
+    if validate:
+        validate_ir(ir)
     return ir
