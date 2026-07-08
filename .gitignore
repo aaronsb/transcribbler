@@ -8,6 +8,10 @@ venv/
 .ruff_cache/
 .mypy_cache/
 
+# Build artifacts (make dist / uv build)
+dist/
+build/
+
 # Rust
 target/
 
