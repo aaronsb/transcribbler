@@ -30,6 +30,12 @@ def _cmd_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_meter(args: argparse.Namespace) -> int:
+    from .meter import run_meter
+
+    return run_meter(args.app, sample_s=args.sample)
+
+
 def _cmd_transcribe(args: argparse.Namespace) -> int:
     audio = Path(args.audio)
     if not audio.exists():
@@ -415,6 +421,13 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd")
 
     sub.add_parser("probe", help="detect available GPU backends").set_defaults(func=_cmd_probe)
+
+    mt = sub.add_parser(
+        "meter", help="live dB meter of candidate audio sources — see which is mic vs meeting"
+    )
+    mt.add_argument("--app", default="Google Chrome", help="meeting app to match for candidates")
+    mt.add_argument("--sample", type=float, default=0.4, help="per-source sample seconds (default: 0.4)")
+    mt.set_defaults(func=_cmd_meter)
 
     t = sub.add_parser("transcribe", help="transcribe a file to Canonical IR")
     t.add_argument("audio", help="audio/video file")
