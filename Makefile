@@ -54,8 +54,8 @@ status: ## Show what's installed: CLI entrypoints, uv tool, and the service stat
 	@echo "== uv tool =="; uv tool list 2>/dev/null | grep -A2 '^$(TOOL)' || echo "  $(TOOL): not installed"
 	@echo "== service =="; \
 	  printf "  enabled: %s   active: %s\n" \
-	    "$$(systemctl --user is-enabled $(UNIT) 2>/dev/null || echo no)" \
-	    "$$(systemctl --user is-active $(UNIT) 2>/dev/null || echo no)"
+	    "$$(systemctl --user is-enabled $(UNIT) 2>/dev/null || true)" \
+	    "$$(systemctl --user is-active $(UNIT) 2>/dev/null || true)"
 
 ## --- service (systemd --user, ADR-0007) ---
 
