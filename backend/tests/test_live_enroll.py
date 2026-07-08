@@ -184,6 +184,39 @@ def test_pack_enroll_walk_skip_keeps_speaker_pending(tmp_path, monkeypatch):
     assert library.find_by_name("Priya") is None
 
 
+def test_pack_enroll_explicit_arg_preserves_other_pending(tmp_path, monkeypatch):
+    # Naming one speaker by explicit arg must not clobber another speaker's still-pending flag:
+    # set_pending rewrites the whole list, so `remaining` is seeded from the pack, not the args.
+    _isolate(tmp_path, monkeypatch)
+    _pack_with_pending(tmp_path, pending=["S0", "S1"])
+    _script_input(monkeypatch, ["", "Priya"])  # name S1 only
+
+    cli._cmd_pack_enroll(argparse.Namespace(uid="abc123", speaker=["S1"]))
+    assert pack.load_pack("abc123").meta["pending_enrollment"] == ["S0"]  # S0's flag survives
+
+
+def test_pack_enroll_no_embedding_leaves_flagged(tmp_path, monkeypatch, capsys):
+    # A speaker with a clip but no embedding can't become a voiceprint — the walk must say so and
+    # keep it flagged, not print ✓ and silently drop it.
+    _isolate(tmp_path, monkeypatch)
+    ir = build_live_ir(
+        [(0.0, 2.0, "You", "hi"), (2.0, 5.0, "Remote", "yo")],
+        PROF, duration_s=5.0, operator_label="You", diarized=True,
+    )
+    ids = [s["id"] for s in ir["speakers"]]  # S0 (You), S1 (Remote)
+    clip = _silent_wav(tmp_path / "c.wav")
+    pack.write_pack(
+        ir, title="t", tags=[], embeddings={ids[0]: [1.0, 0.0, 0.0]},  # S1 has NO vector
+        audio={sid: clip for sid in ids}, started=STARTED, uid="noemb1", pending=["S1"],
+    )
+    _script_input(monkeypatch, ["", "Ghost"])
+    rc = cli._cmd_pack_enroll(argparse.Namespace(uid="noemb1", speaker=[]))
+    assert rc == 0
+    assert library.find_by_name("Ghost") is None                       # nothing folded
+    assert pack.load_pack("noemb1").meta["pending_enrollment"] == ["S1"]  # stays flagged
+    assert "no embedding" in capsys.readouterr().out
+
+
 def test_pack_enroll_explicit_speaker_overrides_pending(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     _pack_with_pending(tmp_path, pending=[])  # nothing flagged

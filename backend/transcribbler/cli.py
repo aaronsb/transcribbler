@@ -577,13 +577,21 @@ def _cmd_pack_enroll(args: argparse.Namespace) -> int:
         return 0
 
     by_id = {s["id"]: s for s in pack.pack_details(pk)["speakers"]}
-    remaining = list(targets)  # what stays pending after this walk
+    # `remaining` is the pack's *actual* flag list, edited in place: only the speakers we resolve
+    # this walk drop out. Seeding it from `targets` would let an explicit `enroll <uid> S1` erase
+    # S2's still-pending flag when set_pending rewrites the list.
+    remaining = list(pk.meta.get("pending_enrollment") or [])
+
+    def _drop(sid: str) -> None:
+        if sid in remaining:
+            remaining.remove(sid)
+
     print(f"naming {len(targets)} flagged speaker(s) in pack {pk.uid} — a name enrolls, blank skips\n")
     for sid in targets:
         st = by_id.get(sid)
         if st is None:  # flagged id no longer in the record (e.g. re-processed) — drop it
             print(f"  {sid}: not in this pack — dropping from the flagged list")
-            remaining.remove(sid)
+            _drop(sid)
             continue
         print(f"  {sid}: {st['turns']} turn(s), {st['speech_s']:.0f}s of speech"
               f"{'' if st['clip'] else '  (no isolated clip)'}")
@@ -604,14 +612,17 @@ def _cmd_pack_enroll(args: argparse.Namespace) -> int:
         try:
             pk = pack.relabel(pk, sid, name)
             vps = pack.extract(pk.blob_path, only=[sid])
-            pk = pack.link_voiceprints(pk, vps)
         except ValueError as e:
             print(f"    error: {e}", file=sys.stderr)
             continue
-        remaining.remove(sid)
-        vp = next((v for v in vps if v.uid == f"{pk.uid}-{pack.slug(name)}"), None)
-        detail = f"  (voiceprint {vp.uid}, {vp.samples} sample(s))" if vp else ""
-        print(f"    ✓ {sid} → {name!r}{detail}\n")
+        if not vps:  # relabel stuck, but the speaker carried no embedding to fold → no voiceprint
+            print(f"    named {sid} → {name!r}, but it has no embedding — no voiceprint created; "
+                  f"leaving it flagged\n")
+            continue
+        pk = pack.link_voiceprints(pk, vps)
+        _drop(sid)
+        vp = vps[0]
+        print(f"    ✓ {sid} → {name!r}  (voiceprint {vp.uid}, {vp.samples} sample(s))\n")
 
     pk = pack.set_pending(pk, remaining)
     if remaining:
