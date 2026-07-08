@@ -2,6 +2,7 @@
 
 - **Status**: Proposed
 - **Date**: 2026-07-06
+- **Updated**: 2026-07-08 — concrete live adjudication surface, re-renderable session model, and recompute-on-identify specified (still Proposed)
 - **Deciders**: Aaron
 
 ## Context
@@ -146,6 +147,88 @@ single **offline re-diarization** over the full audio produces the authoritative
 assignment, and its result is **reconciled** against the online UIDs (the online→offline label
 map). The operator's merge/split/name decisions apply to the reconciled result.
 
+## Live adjudication surface (the concrete in-meeting mechanism)
+
+The Decision above fixes the *model* (opaque UIDs, human adjudication, evidence store, warm
+daemon). This section fixes the concrete surface the operator actually uses **while
+participating in the meeting** — the specification that makes "the machine proposes, the
+operator corrects" a real, low-friction interaction rather than a principle.
+
+### The operator is human-*on*-the-loop, not in-the-loop
+
+The machine auto-matches and auto-consolidates every window on its own; the operator glances at
+the running transcript and **intervenes only when they spot an error**. No decision is gated on
+the human — attribution never blocks waiting for input. This is the difference between watching
+a meeting and running a labelling tool, and it is the load-bearing UX constraint.
+
+### A re-renderable session model — turns reference UIDs, labels and confidence resolve at render
+
+The live transcript is **not** append-only text. Each turn stores `(uid, start, end, text)`; the
+displayed **name** and **match confidence** are resolved from the gallery at render time. Any
+identity operation (name / join / merge / split) is therefore an edit to `uid → name` and the
+`uid → uid` consolidation map, followed by a **re-render of the whole session-so-far** — turn
+references never change (the linchpin above). The recompute is trivial by construction: a UID
+carries a running centroid, so re-scoring the handful of session UIDs against a new anchor is a
+few dozen dot products — microseconds. The transcript **file** is rewritten in full on every op
+(always consistent); the **view** redraws from the same model.
+
+### The interaction — select rows, act on the selection
+
+A full-screen TUI (`curses`, matching the backend's no-heavy-deps posture) presents the live
+transcript as navigable rows while new turns stream in below:
+
+- **Navigate + select.** Arrow over rows; `space` toggles an inverse-highlight selection. New
+  turns keep appending during selection; selection is keyed by turn UID, so it survives the
+  re-renders those appends cause. Selecting whole-speaker (all rows of one `S[n]`) is a shortcut
+  over the common case; per-row selection is what makes **split** precise.
+- **Act.** `Enter` on a selection opens a dialog:
+  - **Enroll New Print** (the speakers are unidentified) → name prompt → save → back to the
+    transcript.
+  - **Join To Print** → a list of existing voiceprints, with **Enroll New Print** pinned
+    distinctively at the bottom as a second path in.
+  - `Esc` pops one level up the dialog stack; it never commits.
+- The selected **clean-prose rows are the enrollment exemplars** — the operator points at the
+  utterances that best represent the voice, realizing the evidence-store model literally.
+
+### Recompute-on-identify — naming one speaker re-scores all the others
+
+The moment a UID is named or joined, it becomes an **anchor**, and the gallery re-scores every
+*other* still-unidentified UID against it. This is what makes a live session self-correct: if one
+voice was fragmented into `S2`, `S4`, `S6`, `S10`, naming `S2` pulls the others in.
+
+- **Above a consolidation ceiling** → auto-merge into the anchor (the machine is confident).
+- **Below it** → left displayed with their **updated confidence**, as a *proposal* — never
+  silently merged. HOTL forbids the machine merging a maybe.
+
+A **confidence column** in the transcript is therefore the operator's triage cue: low-confidence
+rows are exactly the ones worth selecting and running through the same enroll/join, which
+recomputes with the new composite score. One tunable threshold separates "auto-consolidate" from
+"propose"; it is corpus/mic-dependent (see the threshold cost below).
+
+### In-situ enrollment is a live pack relabel + extract
+
+Enrolling from selected rows is the same operation as ADR-0028/0029's post-session
+`relabel` + `extract`, run *during* the session: the speaker's centroid folds into a named
+voiceprint in the durable library, and the session pack ([ADR-0028](0028-session-resource-pack-and-regeneration.md))
+is its exemplar/audio substrate. The pack-lifecycle verbs ([ADR-0029](0029-pack-lifecycle-and-teaching.md))
+are the offline half of the same surface; this is the online half.
+
+### Matching is inline; only the model is warm
+
+The warm daemon (decided above) exists to amortize *model load*, not to parallelize matching.
+The per-segment cosine match and the recompute-on-identify are cheap and run **inline** in the
+capture loop; the operator's actions run on the existing key-input thread. No separate threads
+are introduced for identity work — that would add shared-gallery races for no latency gain. If
+per-window wall-time ever becomes the constraint, the real lever is parallelizing ASR against
+diarization within a window (they are independent), not threading the matcher.
+
+### Operator live decisions survive the offline reconciliation
+
+The offline re-diarization pass (below) improves diarization *quality*, but the operator's live
+name/join/merge/split decisions are **authoritative supervision**: they are inputs the
+reconciliation must honour, not proposals it may overwrite. Reconciliation may re-attribute a
+turn's diarized boundary; it may not un-name a UID the operator named.
+
 ## Consequences
 
 ### Good
@@ -155,6 +238,12 @@ map). The operator's merge/split/name decisions apply to the reconciled result.
   operation reversible.
 - Accuracy improves over time with zero extra modeling: refinement compounds and human
   corrections are supervision.
+- **The operator-effort curve declines across sessions.** Because the session gallery is seeded
+  from the persistent library at start, every session inherits the combined matching work of all
+  prior sessions: known voices auto-anchor on arrival and need no adjudication, so the operator
+  only ever names genuine newcomers. After a handful of meetings the recurring core is covered
+  and the dataset is self-maintaining — a usable diarization corpus that needs little caretaking,
+  produced as a byproduct of normal meeting participation rather than a labelling project.
 - The operator anchor removes the hardest speaker from the clustering problem entirely.
 - A well-understood, battle-tested UX pattern (Photos face grouping) — low conceptual risk.
 
@@ -167,6 +256,9 @@ map). The operator's merge/split/name decisions apply to the reconciled result.
 - Threshold tuning (match, open-set floor, dormancy TTL) is corpus- and mic-dependent and has
   no universal constant; getting it wrong yields false-new or false-match errors.
 - A persistent daemon adds process-lifecycle and memory-residency concerns (gallery in RAM).
+- The live adjudication TUI is a real build: a full-screen `curses` view with tail-follow, a
+  UID-keyed selection model that survives re-renders, and a modal dialog stack. It replaces the
+  interim scrolling console and is the most UX-heavy component in the backend to date.
 - The whole pipeline is tuned for *speech*: ASR and the speaker-embedding model both degrade on
   full-on music / singing. Sung content transcribes poorly (mostly `[Music]` markers, garbled
   lyrics) and yields unreliable voiceprints that break stitching in *both* directions —
@@ -207,6 +299,8 @@ map). The operator's merge/split/name decisions apply to the reconciled result.
 ## Related
 
 - [ADR-0023](0023-voiceprint-lifecycle.md) — voiceprint store, enrollment, matching (batch); this ADR extends it to the online, cross-session, human-adjudicated case
+- [ADR-0028](0028-session-resource-pack-and-regeneration.md) — the session pack is the exemplar/audio substrate the live gallery writes back to
+- [ADR-0029](0029-pack-lifecycle-and-teaching.md) — the offline pack-lifecycle verbs (relabel/extract/audition) that in-situ enrollment is the live half of
 - [ADR-0016](0016-speaker-naming-strategy.md) — speaker naming tiers and precedence
 - [ADR-0022](0022-live-audio-ingest.md) — sessionized live audio ingest; the daemon lives here
 - [ADR-0013](0013-retention-and-consent.md) — retention and consent for biometric data
