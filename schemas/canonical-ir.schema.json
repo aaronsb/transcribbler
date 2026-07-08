@@ -106,6 +106,12 @@
         "start": { "type": "number", "minimum": 0, "description": "Turn start (s), absolute within the document." },
         "end": { "type": "number", "minimum": 0, "description": "Turn end (s), absolute. Must be >= start (enforced by the apply() builder)." },
         "text": { "type": "string" },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "ASR confidence for this turn — the source segment's mean token probability. Optional; low values flag likely-garbage spans for review (ADR-0028 anticipated per-turn confidence)."
+        },
         "words": {
           "type": "array",
           "items": { "$ref": "#/$defs/word" },

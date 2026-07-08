@@ -18,6 +18,7 @@ class Segment:
     start: float  # seconds, absolute within the audio
     end: float
     text: str
+    confidence: float | None = None  # mean token probability (0-1); None if the core omits it
 
 
 @dataclass(frozen=True)

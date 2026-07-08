@@ -20,6 +20,18 @@ def _ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{sec:02d}.{ms:03d}"
 
 
+# Blocks whose weakest turn falls below this mean-token-probability are flagged in the
+# transcript as likely-garbage spans worth a human's eye (ADR-0028 → ADR-0030 reconciliation).
+LOW_CONFIDENCE = 0.6
+
+
+def _merge_confidence(current: float | None, incoming: float | None) -> float | None:
+    """A block is as trustworthy as its weakest attributed turn → keep the minimum."""
+    if incoming is None:
+        return current
+    return incoming if current is None else min(current, incoming)
+
+
 def _group_consecutive(turns: list[dict]) -> list[dict]:
     """Merge runs of consecutive turns by the same speaker into one block."""
     blocks: list[dict] = []
@@ -27,6 +39,7 @@ def _group_consecutive(turns: list[dict]) -> list[dict]:
         if blocks and blocks[-1]["speaker_id"] == t["speaker_id"]:
             blocks[-1]["end"] = t["end"]
             blocks[-1]["text"] += " " + t["text"].strip()
+            blocks[-1]["confidence"] = _merge_confidence(blocks[-1]["confidence"], t.get("confidence"))
         else:
             blocks.append(
                 {
@@ -34,6 +47,7 @@ def _group_consecutive(turns: list[dict]) -> list[dict]:
                     "start": t["start"],
                     "end": t["end"],
                     "text": t["text"].strip(),
+                    "confidence": t.get("confidence"),
                 }
             )
     return blocks
@@ -62,7 +76,9 @@ def to_markdown(ir: dict) -> str:
 
     body = []
     for b in _group_consecutive(ir["turns"]):
-        body.append(f"**{labels.get(b['speaker_id'], b['speaker_id'])}** [{_ts(b['start'])}]")
+        conf = b["confidence"]
+        flag = f"  ⚠ low confidence ({conf:.2f})" if conf is not None and conf < LOW_CONFIDENCE else ""
+        body.append(f"**{labels.get(b['speaker_id'], b['speaker_id'])}** [{_ts(b['start'])}]{flag}")
         body.append(b["text"])
         body.append("")
     return "\n".join(head + body).rstrip() + "\n"

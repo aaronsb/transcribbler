@@ -61,7 +61,7 @@ class WhisperCppCore:
             "-f",
             str(wav),
             "-pp",  # emit `progress = N%` on stderr (rendered live when streaming)
-            "-oj",  # JSON output
+            "-ojf",  # full JSON output — includes per-token probabilities (for confidence)
             "-of",
             str(out_prefix),  # output file prefix
         ]
@@ -73,6 +73,21 @@ class WhisperCppCore:
         rc, _out, tail = run_streamed(cmd, stream=progress is not None, on_line=on_line)
         if rc != 0:
             raise RuntimeError(f"whisper-cli failed ({rc}): {tail[-500:]}")
+
+
+def _segment_confidence(tokens: list[dict]) -> float | None:
+    """Mean probability of a segment's *word* tokens (whisper's per-token ``p``, full JSON).
+
+    Special tokens — timestamps and markers like ``[_BEG_]`` — are excluded so the score
+    reflects the actual words. Returns None when no usable probabilities are present (e.g. the
+    binary emitted basic JSON), which keeps ``confidence`` optional all the way to the IR.
+    """
+    ps = [
+        t["p"]
+        for t in tokens
+        if isinstance(t.get("p"), (int, float)) and not t.get("text", "").strip().startswith("[_")
+    ]
+    return round(sum(ps) / len(ps), 3) if ps else None
 
 
 def _parse(json_path: Path) -> list[Segment]:
@@ -88,6 +103,7 @@ def _parse(json_path: Path) -> list[Segment]:
                 start=offsets.get("from", 0) / 1000.0,
                 end=offsets.get("to", 0) / 1000.0,
                 text=text,
+                confidence=_segment_confidence(item.get("tokens", [])),
             )
         )
     return segments

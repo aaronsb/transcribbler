@@ -28,6 +28,7 @@ class AlignedTurn:
     end: float
     text: str
     secondary_speakers: list[str] = field(default_factory=list)
+    confidence: float | None = None  # carried from the source ASR segment
 
 
 def _overlap(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
@@ -90,6 +91,7 @@ def align(segments: list[Segment], turns: list[SpeakerTurn]) -> tuple[list[str],
                 end=seg.end,
                 text=seg.text,
                 secondary_speakers=secondary,
+                confidence=seg.confidence,
             )
         )
     # Only declare speakers actually referenced by a turn (primary or secondary).
