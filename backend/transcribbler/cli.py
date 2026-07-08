@@ -305,7 +305,15 @@ def _cmd_listen(args: argparse.Namespace) -> int:
     # after the terminal is back in cooked mode and the key thread has stopped — so input()
     # behaves, and only when interactive (a piped run just leaves them pending on the pack).
     if result is not None and sys.stdin.isatty() and sys.stdout.isatty():
-        pending = pack.load_pack(result.uid).meta.get("pending_enrollment") or []
+        # Prefer the uid (find_packs resolves the loose sidecar too, so relabel keeps transcript.md
+        # in step); fall back to the blob path when a `listen -o <path>` session landed the pack
+        # outside the sessions store, where a uid lookup would miss it and raise.
+        try:
+            pending = pack.load_pack(result.uid).meta.get("pending_enrollment") or []
+            ident = result.uid
+        except ValueError:
+            ident = str(result.blob_path)
+            pending = pack.load_pack(ident).meta.get("pending_enrollment") or []
         if pending:
             try:
                 ans = input(f"\nyou flagged {len(pending)} speaker(s) to remember — "
@@ -313,9 +321,9 @@ def _cmd_listen(args: argparse.Namespace) -> int:
             except (EOFError, KeyboardInterrupt):
                 ans = "n"
             if ans in ("", "y", "yes"):
-                _cmd_pack_enroll(argparse.Namespace(uid=result.uid, speaker=[]))
+                _cmd_pack_enroll(argparse.Namespace(uid=ident, speaker=[]))
             else:
-                print(f"  later:  transcribbler pack enroll {result.uid}")
+                print(f"  later:  transcribbler pack enroll {ident}")
     return 0
 
 
