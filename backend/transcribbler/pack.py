@@ -182,6 +182,7 @@ def write_pack(
     uid: str | None = None,
     dest_dir: Path | None = None,
     md_path: Path | None = None,
+    pending: list[str] | None = None,
 ) -> PackResult:
     """Write one session pack: the loose ``.md`` sidecar + the self-describing blob.
 
@@ -194,6 +195,9 @@ def write_pack(
     ``md_path`` pins the loose sidecar to an explicit path (e.g. the operator's ``-o``
     transcript) instead of deriving+disambiguating one under ``dest_dir``; the blob still
     lands beside it in ``dest_dir``.
+
+    ``pending`` is the list of canonical speaker ids the operator flagged live to remember;
+    it is stamped as ``pending_enrollment`` so ``pack enroll`` knows whom to name (ADR-0024).
     """
     started = started or datetime.now(timezone.utc)
     uid = uid or new_uid()
@@ -216,6 +220,8 @@ def write_pack(
         "participants": [label_by_id[s["id"]] for s in ir["speakers"]],
         "blob": archive,
     }
+    if pending:
+        meta["pending_enrollment"] = list(pending)
     sidecar = _frontmatter(meta) + "\n" + render.to_markdown(ir)
     embed_doc = {"spec_version": SPEC_VERSION, "pack_uid": uid, "vectors": embeddings}
 
@@ -253,12 +259,17 @@ def write_pack(
     return PackResult(uid=uid, md_path=md_path, blob_path=blob_path)
 
 
-def extract(blob_path: Path) -> list[library.Voiceprint]:
+def extract(blob_path: Path, *, only: list[str] | None = None) -> list[library.Voiceprint]:
     """Fold every speaker embedding in a pack into the durable library (spec §8.1).
 
     Universal over any pack: reads the embedding sidecar + record, maps each speaker id to
     its display name, and enrolls/compounds it under a stable ``<pack_uid>-<name>`` uid with
     a ``sources`` back-reference to this blob. Returns the resulting voiceprints.
+
+    ``only`` restricts the fold to those canonical speaker ids — the guided live-enroll walk
+    names one speaker at a time and folds just that one, so the speakers the operator chose
+    *not* to name never litter the library with anonymous ``<pack_uid>-sN`` voiceprints. The
+    default (``None``) folds every speaker, unchanged.
 
     Name is the identity key (spec §8.2's ``<pack_uid>-<name>``), so distinct people who
     share a display name — or the generic operator label ``You`` across capture packs — fold
@@ -288,8 +299,11 @@ def extract(blob_path: Path) -> list[library.Voiceprint]:
     # store or beside an operator's ``-o`` transcript (spec §9 relative-link convention).
     source_ref = os.path.relpath(blob_path.resolve(), paths.library_dir())
 
+    only_set = set(only) if only is not None else None
     updates: list[library.Voiceprint] = []
     for sid, vector in embed_doc["vectors"].items():
+        if only_set is not None and sid not in only_set:
+            continue
         name = names.get(sid, sid)
         vp = library.enroll(name, vector, uid=f"{pack_uid}-{slug(name)}", source=source_ref)
         updates.append(vp)
@@ -528,6 +542,32 @@ def delete_pack(pack: PackInfo) -> None:
             parent.rmdir()  # only succeeds if now empty
         except OSError:
             pass
+
+
+def set_pending(pack: PackInfo, speaker_ids: list[str]) -> PackInfo:
+    """Rewrite the pack's ``pending_enrollment`` — the durable record of who to name.
+
+    A non-empty list is stamped as ``pending_enrollment``; an empty list clears the key
+    entirely. This is how the guided ``pack enroll`` walk records progress: speakers still
+    to name stay listed (so the walk resumes), named ones are dropped. Meta-only, through the
+    one atomic rewrite primitive, so a crash mid-walk can't corrupt the blob. A no-op (same
+    list) skips the O(pack) rewrite.
+    """
+    old = pack.meta.get("pending_enrollment")
+    new = list(speaker_ids) if speaker_ids else None
+    if new == old:
+        return pack
+    meta = dict(pack.meta)
+    if new is not None:
+        meta["pending_enrollment"] = new
+    else:
+        meta.pop("pending_enrollment", None)
+    ir = read_record(pack.blob_path)
+    sidecar = _sidecar_for(ir, meta)
+    _rewrite_blob(pack.blob_path, new_ir=ir, new_sidecar=sidecar)
+    if pack.md_path is not None:
+        pack.md_path.write_text(sidecar)
+    return PackInfo(pack.uid, pack.blob_path, pack.md_path, meta)
 
 
 def link_voiceprints(pack: PackInfo, voiceprints: list[library.Voiceprint]) -> PackInfo:

@@ -123,7 +123,7 @@ def _fmt_turn(turn, color: bool) -> str:
 
 
 def _key_listener(controls, say) -> None:
-    """Single-key controls: space toggles pause, q quits. Caller sets cbreak mode."""
+    """Single-key controls: space pauses, e flags the current speaker, q quits. cbreak mode."""
     import select
 
     while not controls.stopped:
@@ -137,6 +137,12 @@ def _key_listener(controls, say) -> None:
         if ch == " ":
             controls.toggle_pause()
             say("  ⏸  paused (listening off)" if controls.paused else "  ▶  resumed")
+        elif ch in ("e", "E"):
+            label = controls.flag_current()
+            if label is not None:
+                say(f"  ⭐ flagged {label} to remember — you'll name them when you finish")
+            else:
+                say("  (no remote speaker heard yet to flag)")
         elif ch in ("q", "Q"):
             say("  quitting… (finalizing the tail)")
             controls.stop()
@@ -191,7 +197,7 @@ class _LiveConsole:
 def _cmd_listen(args: argparse.Namespace) -> int:
     from datetime import datetime
 
-    from . import paths
+    from . import pack, paths
     from .capture import Controls, SourceError, run_capture
 
     try:
@@ -213,6 +219,7 @@ def _cmd_listen(args: argparse.Namespace) -> int:
     color = sys.stdout.isatty()
     console = _LiveConsole(fancy=color)
     controls = Controls()
+    result: pack.PackResult | None = None
 
     def say(m: str) -> None:
         # In fancy mode route notices through the console so they scroll above the
@@ -249,10 +256,11 @@ def _cmd_listen(args: argparse.Namespace) -> int:
             old_termios = termios.tcgetattr(fd)
             tty.setcbreak(fd)  # ISIG stays on → Ctrl-C still works
             threading.Thread(target=_key_listener, args=(controls, say), daemon=True).start()
-            say(f"listening → {out_path}    [space] pause/resume    [q] quit (finalizes the tail)")
+            say(f"listening → {out_path}    [space] pause    [e] remember speaker    "
+                f"[q] quit (finalizes the tail)")
         else:
             say(f"listening → {out_path}    (Ctrl-C to stop)")
-        run_capture(
+        result = run_capture(
             profile,
             out_path,
             app=args.app,
@@ -293,6 +301,21 @@ def _cmd_listen(args: argparse.Namespace) -> int:
 
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_termios)
     say(f"saved → {out_path}")
+    # Offer the guided naming walk for any speakers flagged live with [e]. Runs only now —
+    # after the terminal is back in cooked mode and the key thread has stopped — so input()
+    # behaves, and only when interactive (a piped run just leaves them pending on the pack).
+    if result is not None and sys.stdin.isatty() and sys.stdout.isatty():
+        pending = pack.load_pack(result.uid).meta.get("pending_enrollment") or []
+        if pending:
+            try:
+                ans = input(f"\nyou flagged {len(pending)} speaker(s) to remember — "
+                            f"name them now? [Y/n] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+            if ans in ("", "y", "yes"):
+                _cmd_pack_enroll(argparse.Namespace(uid=result.uid, speaker=[]))
+            else:
+                print(f"  later:  transcribbler pack enroll {result.uid}")
     return 0
 
 
@@ -448,6 +471,8 @@ def _cmd_pack_show(args: argparse.Namespace) -> int:
     print(f"  audio  : {'present (auditionable / re-processable)' if d['has_audio'] else 'stripped (finalized)'}")
     if m.get("voiceprints"):
         print(f"  linked : {', '.join(m['voiceprints'])}")
+    if m.get("pending_enrollment"):
+        print(f"  flagged: {', '.join(m['pending_enrollment'])}  (name them: pack enroll {pk.uid})")
     print(f"\n  {'speaker':10}{'name':20}{'turns':>6}{'speech':>9}  clip")
     for s in d["speakers"]:
         print(f"  {s['id']:10}{s['name']:20}{s['turns']:>6}{s['speech_s']:>8.0f}s  {'yes' if s['clip'] else '-'}")
@@ -470,8 +495,31 @@ def _cmd_pack_extract(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_pack_audition(args: argparse.Namespace) -> int:
+def _play_clip(clip: Path) -> str | None:
+    """Play a clip through the first available player; ``None`` on success, else an error message.
+
+    Tries ffplay → paplay → aplay, skipping any that isn't installed and continuing past one that
+    errors, so a missing/degraded player never blocks the (audio-optional) audition or enroll flow.
+    """
     import subprocess
+
+    failed = []
+    for player in (["ffplay", "-autoexit", "-nodisp", "-loglevel", "error"], ["paplay"], ["aplay", "-q"]):
+        try:
+            subprocess.run([*player, str(clip)], check=True)
+            return None
+        except FileNotFoundError:
+            continue  # this player isn't installed — try the next
+        except KeyboardInterrupt:
+            return None  # operator stopped playback; that's fine
+        except subprocess.CalledProcessError as e:
+            failed.append(f"{player[0]} ({e})")  # present but errored — try the next player
+    if failed:
+        return f"playback failed: {'; '.join(failed)}"
+    return "no audio player found (tried ffplay, paplay, aplay)"
+
+
+def _cmd_pack_audition(args: argparse.Namespace) -> int:
     import tempfile
 
     from . import pack
@@ -488,22 +536,81 @@ def _cmd_pack_audition(args: argparse.Namespace) -> int:
             print(f"error: {e}", file=sys.stderr)
             return 2
         print(f"auditioning {args.speaker} of pack {pk.uid} — Ctrl-C to stop")
-        failed = []
-        for player in (["ffplay", "-autoexit", "-nodisp", "-loglevel", "error"], ["paplay"], ["aplay", "-q"]):
-            try:
-                subprocess.run([*player, str(clip)], check=True)
-                return 0
-            except FileNotFoundError:
-                continue  # this player isn't installed — try the next
-            except KeyboardInterrupt:
-                return 0
-            except subprocess.CalledProcessError as e:
-                failed.append(f"{player[0]} ({e})")  # present but errored — try the next player
-        if failed:
-            print(f"error: playback failed: {'; '.join(failed)}", file=sys.stderr)
-        else:
-            print("error: no audio player found (tried ffplay, paplay, aplay)", file=sys.stderr)
+        err = _play_clip(clip)
+    if err is not None:
+        print(f"error: {err}", file=sys.stderr)
         return 2
+    return 0
+
+
+def _cmd_pack_enroll(args: argparse.Namespace) -> int:
+    """Guided walk: name each flagged (or given) anonymous speaker → named voiceprint.
+
+    The end of the capture→named-voiceprint loop (ADR-0024/0029): for each speaker the operator
+    flagged live (``pending_enrollment``), or each id passed explicitly, audition the clip on
+    request, take a name, then relabel + extract *just that speaker* into the library. Named
+    speakers drop out of ``pending``; skipped ones stay, so the walk resumes next time.
+    """
+    import tempfile
+
+    from . import pack
+
+    try:
+        pk = pack.load_pack(args.uid)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    raw = args.speaker if args.speaker else (pk.meta.get("pending_enrollment") or [])
+    targets = list(dict.fromkeys(raw))  # de-dupe, keep order (a repeated id would double-remove)
+    if not targets:
+        print(f"pack {pk.uid} has no speakers flagged to remember — flag them live with [e] "
+              f"during `listen`, or name one now: transcribbler pack enroll {pk.uid} S1")
+        return 0
+
+    by_id = {s["id"]: s for s in pack.pack_details(pk)["speakers"]}
+    remaining = list(targets)  # what stays pending after this walk
+    print(f"naming {len(targets)} flagged speaker(s) in pack {pk.uid} — a name enrolls, blank skips\n")
+    for sid in targets:
+        st = by_id.get(sid)
+        if st is None:  # flagged id no longer in the record (e.g. re-processed) — drop it
+            print(f"  {sid}: not in this pack — dropping from the flagged list")
+            remaining.remove(sid)
+            continue
+        print(f"  {sid}: {st['turns']} turn(s), {st['speech_s']:.0f}s of speech"
+              f"{'' if st['clip'] else '  (no isolated clip)'}")
+        try:
+            while st["clip"] and input(f"    [p] play clip, or Enter to name {sid}: ").strip().lower() == "p":
+                with tempfile.TemporaryDirectory() as tmp:
+                    clip = pack.read_clip(pk, sid, Path(tmp) / "clip")
+                    err = _play_clip(clip)
+                if err is not None:
+                    print(f"    ({err})")
+            name = input(f"    name for {sid} (blank = skip): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\ncancelled.", file=sys.stderr)
+            break
+        if not name:
+            print(f"    skipped {sid}\n")
+            continue
+        try:
+            pk = pack.relabel(pk, sid, name)
+            vps = pack.extract(pk.blob_path, only=[sid])
+            pk = pack.link_voiceprints(pk, vps)
+        except ValueError as e:
+            print(f"    error: {e}", file=sys.stderr)
+            continue
+        remaining.remove(sid)
+        vp = next((v for v in vps if v.uid == f"{pk.uid}-{pack.slug(name)}"), None)
+        detail = f"  (voiceprint {vp.uid}, {vp.samples} sample(s))" if vp else ""
+        print(f"    ✓ {sid} → {name!r}{detail}\n")
+
+    pk = pack.set_pending(pk, remaining)
+    if remaining:
+        print(f"{len(remaining)} still flagged — resume with: transcribbler pack enroll {pk.uid}")
+    else:
+        print("all flagged speakers handled.")
+    return 0
 
 
 def _cmd_pack_relabel(args: argparse.Namespace) -> int:
@@ -700,6 +807,15 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("speaker", help="canonical speaker id (e.g. S1)")
     pr.add_argument("name", help="display name to assign")
     pr.set_defaults(func=_cmd_pack_relabel)
+    pen = pk_sub.add_parser(
+        "enroll", help="guided walk: name the speakers flagged live ([e]) → named voiceprints"
+    )
+    pen.add_argument("uid", help="pack uid (or a unique prefix)")
+    pen.add_argument(
+        "speaker", nargs="*",
+        help="speaker id(s) to name (default: the pack's flagged pending_enrollment list)",
+    )
+    pen.set_defaults(func=_cmd_pack_enroll)
     pd = pk_sub.add_parser("delete", help="delete a pack (blob + sidecar); leaves derived voiceprints")
     pd.add_argument("uid", help="pack uid (or a unique prefix)")
     pd.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")

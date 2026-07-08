@@ -32,7 +32,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import capture_persist
+from . import capture_persist, pack
 from .attribution import Attributed, is_repeat, split_segment_by_turns
 from .cores import asr_core
 from .diarizer_daemon import DiarizerDaemon
@@ -221,15 +221,24 @@ class Turn:
 
 
 class Controls:
-    """Thread-safe run controls for the interactive console: pause + stop.
+    """Thread-safe run controls for the interactive console: pause, stop, and flag-to-remember.
 
     A keyboard-listener thread flips these; the capture loop polls them. Pausing
     discards incoming chunks (listening off), it does not pause the ffmpeg capture.
+
+    Flag-to-remember is the live-enroll gesture (ADR-0024): as remote turns scroll by
+    the loop reports each one's label via :meth:`note_speaker`, so a single keypress in
+    the listener thread can :meth:`flag_current` — mark *whoever is talking now* to be
+    named at session end. The flagged set is drained by the persist path into the pack's
+    ``pending_enrollment`` so the guided walk knows which anonymous speakers to name.
     """
 
     def __init__(self) -> None:
         self._paused = threading.Event()
         self._stopped = threading.Event()
+        self._lock = threading.Lock()
+        self._last_remote: str | None = None
+        self._flagged: set[str] = set()
 
     def toggle_pause(self) -> None:
         self._paused.clear() if self._paused.is_set() else self._paused.set()
@@ -244,6 +253,24 @@ class Controls:
     @property
     def stopped(self) -> bool:
         return self._stopped.is_set()
+
+    def note_speaker(self, label: str) -> None:
+        """Record the most-recently-emitted remote label — the target of ``flag_current``."""
+        with self._lock:
+            self._last_remote = label
+
+    def flag_current(self) -> str | None:
+        """Flag the current remote speaker to remember; returns its label, or None if none yet."""
+        with self._lock:
+            if self._last_remote is None:
+                return None
+            self._flagged.add(self._last_remote)
+            return self._last_remote
+
+    @property
+    def flagged(self) -> set[str]:
+        with self._lock:
+            return set(self._flagged)
 
 
 _FFMPEG_OP_TIMEOUT = 60  # seconds; a per-chunk ffmpeg op hanging longer is dropped
@@ -511,12 +538,15 @@ def run_capture(
     banner: bool = True,
     workdir: Path | None = None,
     log: Log | None = None,
-) -> None:
+) -> pack.PackResult | None:
     """Capture live audio and append a rolling transcript to ``out_path``.
 
     Runs until interrupted (Ctrl-C). Window N (chunks N-1..N) is transcribed once
     chunk N+1 opens; overlapping windows give ASR context and stable speaker
     linking (ADR-0027).
+
+    Returns the persisted :class:`pack.PackResult` (or ``None`` if nothing was
+    transcribed) so the caller can offer to name any flagged speakers.
     """
     say = log or (lambda _m: None)
 
@@ -563,6 +593,7 @@ def run_capture(
     out = None
     proc = None
     ff_log = None
+    pack_result: pack.PackResult | None = None
     processed: set[int] = set()
     prev_sid_turns: list[tuple[float, float, str]] = []
     recent_emitted: list[Turn] = []  # previous window's turns, to dedup the shared seam
@@ -624,6 +655,8 @@ def run_capture(
                 out.write(f"[{_fmt_ts(t.start)}] {t.speaker}: {t.text}\n")
                 if on_turn is not None:
                     on_turn(t)
+                if controls is not None and t.speaker != operator_label:
+                    controls.note_speaker(t.speaker)  # target for the flag-to-remember keypress
                 written.append(t)
             out.flush()
             if on_chunk is not None:
@@ -707,7 +740,7 @@ def run_capture(
                         capture_persist.assemble_session(retain, segment_s, retain / "session.wav")
                         if retain_audio else None
                     )
-                    result = capture_persist.persist_session_pack(
+                    pack_result = capture_persist.persist_session_pack(
                         [(t.start, t.end, t.speaker, t.text) for t in session_turns],
                         profile,
                         operator_label=operator_label,
@@ -715,8 +748,9 @@ def run_capture(
                         centroids=gallery.centroids() if gallery is not None else {},
                         session_wav=session_wav,
                         out_path=out_path,
+                        flagged=controls.flagged if controls is not None else set(),
                     )
-                    say(f"  session pack → {result.md_path.name} + {result.blob_path.name}")
+                    say(f"  session pack → {pack_result.md_path.name} + {pack_result.blob_path.name}")
                     shutil.rmtree(retain, ignore_errors=True)  # packed → free the raw chunks
                 except Exception as e:
                     # keep retain/ on failure so the session's audio is recoverable, not lost
@@ -726,3 +760,4 @@ def run_capture(
                 shutil.rmtree(retain, ignore_errors=True)
         if daemon is not None:
             daemon.close()
+    return pack_result
