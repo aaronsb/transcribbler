@@ -276,6 +276,14 @@ def _cmd_listen(args: argparse.Namespace) -> int:
         pass
     except SourceError as e:
         say(f"error: {e}")
+        # nothing was captured — don't leave the empty session/scratch dirs behind.
+        # rmdir removes only if empty, so a real session's dirs are never touched.
+        for d in (workdir, out_path.parent if not args.output else None):
+            if d is not None:
+                try:
+                    d.rmdir()
+                except OSError:
+                    pass
         return 2
     finally:
         controls.stop()

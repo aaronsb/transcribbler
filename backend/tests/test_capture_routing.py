@@ -8,7 +8,9 @@ tests exercise the real logic against synthetic graphs, no PipeWire required.
 
 from __future__ import annotations
 
-from transcribbler.capture import _routed_sources
+import pytest
+
+from transcribbler.capture import SourceError, _capture_filter, _routed_sources
 
 
 def _node(nid: int, media_class: str, node_name: str, app: str | None = None) -> dict:
@@ -101,3 +103,41 @@ def test_duplicate_routes_are_deduped():
     )
     _, meeting = _routed_sources("Google Chrome", dump)
     assert meeting == ["speaker_sink.monitor"]
+
+
+def test_malformed_dump_does_not_raise():
+    # A node missing its id, and junk objects — parsing must stay defensive.
+    dump = [
+        {"type": "PipeWire:Interface:Node", "info": {"props": {"media.class": "Audio/Sink"}}},  # no id
+        {"type": "PipeWire:Interface:Link", "info": {}},  # no node ids
+        {"nonsense": True},
+    ]
+    mic, meeting = _routed_sources("Google Chrome", dump)
+    assert mic is None and meeting == []
+
+
+# ---- _capture_filter: the ffmpeg -filter_complex the segmenter runs ----------
+
+
+def test_filter_single_meeting_source_no_amix():
+    # One monitor → straight pan to [s], no amix; join mic(L)+meeting(R).
+    fc = _capture_filter(1)
+    assert "amix" not in fc
+    assert "[1:a]aresample=16000,pan=mono|c0=c0[s]" in fc
+    assert fc.endswith("[m][s]join=inputs=2:channel_layout=stereo[o]")
+
+
+def test_filter_multi_meeting_sources_sum_via_amix():
+    # Three monitors → each panned to [s1..s3], summed (normalize=0), joined.
+    fc = _capture_filter(3)
+    for i in (1, 2, 3):
+        assert f"[{i}:a]aresample=16000,pan=mono|c0=c0[s{i}]" in fc
+    assert "[s1][s2][s3]amix=inputs=3:normalize=0[s]" in fc
+    assert fc.endswith("[m][s]join=inputs=2:channel_layout=stereo[o]")
+
+
+def test_filter_rejects_zero_sources():
+    # Guarded upstream by run_capture; belt-and-suspenders so a bad call fails loudly
+    # rather than emitting a malformed graph.
+    with pytest.raises(SourceError):
+        _capture_filter(0)

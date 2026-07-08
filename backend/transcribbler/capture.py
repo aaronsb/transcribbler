@@ -142,7 +142,9 @@ def _routed_sources(app: str, dump: list[dict] | None = None) -> tuple[str | Non
     for o in dump:
         t = o.get("type")
         if t == "PipeWire:Interface:Node":
-            nodes[o["id"]] = (o.get("info", {}) or {}).get("props", {}) or {}
+            nid = o.get("id")
+            if nid is not None:  # stay defensive: a malformed dump must not raise
+                nodes[nid] = (o.get("info", {}) or {}).get("props", {}) or {}
         elif t == "PipeWire:Interface:Link":
             info = o.get("info", {}) or {}
             links.append((info.get("output-node-id"), info.get("input-node-id")))
@@ -248,24 +250,29 @@ _FFMPEG_OP_TIMEOUT = 60  # seconds; a per-chunk ffmpeg op hanging longer is drop
 _MAX_BACKLOG = 8         # unprocessed chunks tolerated before dropping the oldest (disk guard)
 
 
-def _ffmpeg_segmenter(paths: Paths, workdir: Path, segment_s: int, stderr) -> subprocess.Popen:
-    """Start ffmpeg capturing mic(L) + a mix of the meeting monitor(s)(R) into 16k chunks.
+def _capture_filter(n_meeting: int) -> str:
+    """Build the ffmpeg ``-filter_complex`` for mic(L) + a mix of ``n_meeting`` monitors(R).
 
-    The meeting channel is the *sum* (``amix`` with ``normalize=0``) of every source the
-    app is routed into: whichever route actually carries audio contributes, and a silent
-    route (e.g. an effects sink whose monitor is idle) adds ~nothing. Summing rather than
-    averaging keeps the loud route at full level no matter how many silent routes ride
-    alongside it — averaging would attenuate it by the count of dead siblings.
+    Input 0 is the mic; inputs 1..n are the meeting monitors. Each is downmixed to mono
+    16k; the meeting monitors are *summed* (``amix normalize=0``) so the loud route stays
+    at full level regardless of how many silent routes ride alongside it (averaging would
+    attenuate it by the count of dead siblings). The result is joined mic→L, meeting→R.
     """
-    n = len(paths.meeting)
+    if n_meeting < 1:
+        raise SourceError("no meeting sources to capture")  # guarded upstream; belt-and-suspenders
     mic_part = "[0:a]aresample=16000,pan=mono|c0=c0[m]"
-    if n == 1:
+    if n_meeting == 1:
         mtg_parts = ["[1:a]aresample=16000,pan=mono|c0=c0[s]"]
     else:
-        pre = [f"[{i}:a]aresample=16000,pan=mono|c0=c0[s{i}]" for i in range(1, n + 1)]
-        mix = "".join(f"[s{i}]" for i in range(1, n + 1)) + f"amix=inputs={n}:normalize=0[s]"
+        pre = [f"[{i}:a]aresample=16000,pan=mono|c0=c0[s{i}]" for i in range(1, n_meeting + 1)]
+        mix = "".join(f"[s{i}]" for i in range(1, n_meeting + 1)) + f"amix=inputs={n_meeting}:normalize=0[s]"
         mtg_parts = [*pre, mix]
-    fc = ";".join([mic_part, *mtg_parts, "[m][s]join=inputs=2:channel_layout=stereo[o]"])
+    return ";".join([mic_part, *mtg_parts, "[m][s]join=inputs=2:channel_layout=stereo[o]"])
+
+
+def _ffmpeg_segmenter(paths: Paths, workdir: Path, segment_s: int, stderr) -> subprocess.Popen:
+    """Start ffmpeg capturing mic(L) + a mix of the meeting monitor(s)(R) into 16k chunks."""
+    fc = _capture_filter(len(paths.meeting))
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "pulse", "-i", paths.mic]
     for m in paths.meeting:
         cmd += ["-f", "pulse", "-i", m]
@@ -512,22 +519,11 @@ def run_capture(
     linking (ADR-0027).
     """
     say = log or (lambda _m: None)
-    work = workdir or (out_path.parent / f".{out_path.stem}.capture")
-    work.mkdir(parents=True, exist_ok=True)
-    retain = work / "retain"  # processed chunks kept here for the session pack's audio
-    if retain_audio:
-        retain.mkdir(exist_ok=True)
 
-    def _retire(idx: int) -> None:
-        """A processed chunk is done streaming — keep it for the pack, or drop it."""
-        src = work / f"chunk_{idx:05d}.wav"
-        if retain_audio and src.exists():
-            src.replace(retain / f"chunk_{idx:05d}.wav")
-        else:
-            src.unlink(missing_ok=True)
-
-    # Resolve sources: CLI overrides win; otherwise follow the app's live routing.
-    # A --meeting override pins a single source; detection may return several to mix.
+    # Resolve sources first — before creating any dirs — so an early "nothing is
+    # routed yet" failure raises cleanly instead of stranding empty session/scratch
+    # dirs. CLI overrides win; otherwise follow the app's live routing (a --meeting
+    # override pins a single source; detection may return several to mix).
     detected = detect_paths(app, log=say) if not (mic and meeting) else None
     mic_final = mic or (detected.mic if detected else None)
     if meeting:
@@ -543,6 +539,20 @@ def run_capture(
     if not mic_final:
         raise SourceError("no mic source resolved; pass --mic <source>.")
     paths = Paths(mic=mic_final, meeting=meeting_final)
+
+    work = workdir or (out_path.parent / f".{out_path.stem}.capture")
+    work.mkdir(parents=True, exist_ok=True)
+    retain = work / "retain"  # processed chunks kept here for the session pack's audio
+    if retain_audio:
+        retain.mkdir(exist_ok=True)
+
+    def _retire(idx: int) -> None:
+        """A processed chunk is done streaming — keep it for the pack, or drop it."""
+        src = work / f"chunk_{idx:05d}.wav"
+        if retain_audio and src.exists():
+            src.replace(retain / f"chunk_{idx:05d}.wav")
+        else:
+            src.unlink(missing_ok=True)
 
     use_diar = diarize and profile.diar.enabled
     gallery = SessionGallery(threshold, on_new_speaker=on_new_speaker) if use_diar else None
