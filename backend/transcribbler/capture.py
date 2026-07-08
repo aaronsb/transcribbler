@@ -88,12 +88,19 @@ def _blocks(kind: str) -> list[dict[str, str]]:
 
 
 def _mean_volume_db(source: str, secs: float = 1.5) -> float:
-    """Mean volume (dBFS) of a short capture of `source`; -120.0 if silent/absent."""
-    proc = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-f", "pulse", "-i", source, "-t", f"{secs}",
-         "-af", "volumedetect", "-f", "null", "/dev/null"],
-        capture_output=True, text=True, timeout=secs + 6,
-    )
+    """Mean volume (dBFS) of a short capture of `source`; -120.0 if silent/absent.
+
+    A wedged device (capture hangs past the timeout) folds into the same silent sentinel so a
+    single stalled source degrades to an empty bar in the meter rather than killing the loop.
+    """
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-f", "pulse", "-i", source, "-t", f"{secs}",
+             "-af", "volumedetect", "-f", "null", "/dev/null"],
+            capture_output=True, text=True, timeout=secs + 6,
+        )
+    except subprocess.TimeoutExpired:
+        return -120.0
     m = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", proc.stderr)
     return float(m.group(1)) if m else -120.0
 

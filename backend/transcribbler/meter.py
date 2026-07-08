@@ -68,12 +68,16 @@ def _bar(db: float, width: int = 24) -> str:
 
 
 def _recommend(sources: list[Source], peak: dict[str, float]) -> dict[str, str]:
-    """Loudest source (by session peak) in each role — the meter's exit suggestion."""
+    """Loudest source (by session peak) in each role that rose above the floor.
+
+    A role with no source above ``_FLOOR_DB`` is omitted — the meter won't confidently suggest a
+    route for audio it never actually heard (the operator hadn't played it / spoken).
+    """
     out: dict[str, str] = {}
     for role in ("mic", "meeting"):
-        in_role = [s for s in sources if s.role == role]
-        if in_role:
-            out[role] = max(in_role, key=lambda s: peak[s.name]).name
+        heard = [s for s in sources if s.role == role and peak[s.name] > _FLOOR_DB]
+        if heard:
+            out[role] = max(heard, key=lambda s: peak[s.name]).name
     return out
 
 
@@ -130,7 +134,10 @@ def run_meter(app: str = "Google Chrome", *, sample_s: float = 0.4) -> int:
             drawn = len(frame)
     except KeyboardInterrupt:
         rec = _recommend(sources, peak)
-        print("\n\nloudest this session — paste to pin the routes:")
-        flags = " ".join(f"--{'mic' if r == 'mic' else 'meeting'} {rec[r]!r}" for r in ("mic", "meeting") if r in rec)
-        print(f"  transcribbler listen {flags}\n")
+        if rec:
+            flags = " ".join(f"--{r} {rec[r]!r}" for r in ("mic", "meeting") if r in rec)
+            print("\n\nloudest this session — paste to pin the routes:")
+            print(f"  transcribbler listen {flags}\n")
+        else:
+            print("\n\n(no source rose above the floor — play the meeting / speak, then re-run)\n")
         return 0

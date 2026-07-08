@@ -32,6 +32,13 @@ def test_recommend_picks_loudest_per_role():
     assert rec["mic"] == "mic_a"
 
 
+def test_recommend_omits_roles_never_heard():
+    # nothing rose above the floor → no confident route to suggest (review LOW)
+    srcs = [meter.Source("m.monitor", "meeting", auto=True), meter.Source("mic_a", "mic", auto=True)]
+    silent = {"m.monitor": -120.0, "mic_a": -80.0}  # both below _FLOOR_DB (-60)
+    assert meter._recommend(srcs, silent) == {}
+
+
 def test_candidates_flags_detection_pick(monkeypatch):
     short = {"sinks": {"0": "sinkA", "1": "sinkB"}, "sources": {"0": "micA"}}
     blocks = {
