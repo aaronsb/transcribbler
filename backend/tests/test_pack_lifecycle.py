@@ -139,6 +139,25 @@ def test_relabel_unknown_speaker_raises(tmp_path, monkeypatch):
         pack.relabel(pk, "S9", "Nobody")
 
 
+def test_relabel_empty_name_raises(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    pk = pack.load_pack(_two_speaker_pack(tmp_path).uid)
+    with pytest.raises(ValueError, match="cannot be empty"):
+        pack.relabel(pk, "S1", "   ")
+
+
+def test_relabel_preserves_audio_clips(tmp_path, monkeypatch):
+    # The primary _rewrite_blob contract: mutating the record must not lose the isolated audio.
+    _isolate(tmp_path, monkeypatch)
+    pk = pack.load_pack(_two_speaker_pack(tmp_path).uid)
+    before = pack.pack_details(pk)
+    assert all(s["clip"] for s in before["speakers"])
+    pk = pack.relabel(pk, "S1", "Priya")
+    after = pack.pack_details(pk)
+    assert after["has_audio"] and all(s["clip"] for s in after["speakers"])
+    assert pack.read_clip(pk, "S1", tmp_path / "still").stat().st_size > 0
+
+
 def test_relabel_then_extract_yields_named_voiceprint(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     pk = pack.load_pack(_two_speaker_pack(tmp_path, uid="pack01").uid)
@@ -188,3 +207,29 @@ def test_link_voiceprints_writes_back_edge(tmp_path, monkeypatch):
     # idempotent: re-linking the same voiceprints doesn't grow the edge list
     again = pack.link_voiceprints(pk, vps)
     assert again.meta["voiceprints"] == edges
+
+
+def test_link_edge_depth_for_nested_session_dir(tmp_path, monkeypatch):
+    # The ADR's load-bearing case: a `listen` pack lives in sessions/<id>/, so the edge back to
+    # library/ must climb two levels (../../library/), not one.
+    _isolate(tmp_path, monkeypatch)
+    from transcribbler import paths
+
+    sub = paths.ensure(paths.sessions_dir() / "20260708-141042")
+    ir = build_live_ir([(0.0, 3.0, "Remote", "hi there")], PROF, duration_s=3.0, operator_label="You")
+    r = pack.write_pack(ir, title="s", tags=["meeting"], embeddings={"S0": [0.0, 1.0, 0.0]},
+                        audio={}, dest_dir=sub, md_path=sub / "transcript.md")
+    pk = pack.load_pack(r.uid)
+    pk = pack.link_voiceprints(pk, pack.extract(pk.blob_path))
+    assert all(e.startswith("../../library/") for e in pk.meta["voiceprints"])
+
+
+def test_rewrite_blob_drop_audio_strips_clips_keeps_record(tmp_path, monkeypatch):
+    # The finalize primitive's other branch: drop_audio removes audio/ but keeps the record +
+    # embeddings seed (so a finalized pack still extracts).
+    _isolate(tmp_path, monkeypatch)
+    pk = pack.load_pack(_two_speaker_pack(tmp_path).uid)
+    ir = pack.read_record(pk.blob_path)
+    pack._rewrite_blob(pk.blob_path, new_ir=ir, new_sidecar="---\n---\n", drop_audio=True)
+    assert pack.pack_details(pk)["has_audio"] is False
+    assert pack.extract(pk.blob_path)  # embeddings.json seed survived → still extractable

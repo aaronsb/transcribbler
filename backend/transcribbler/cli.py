@@ -488,6 +488,7 @@ def _cmd_pack_audition(args: argparse.Namespace) -> int:
             print(f"error: {e}", file=sys.stderr)
             return 2
         print(f"auditioning {args.speaker} of pack {pk.uid} — Ctrl-C to stop")
+        failed = []
         for player in (["ffplay", "-autoexit", "-nodisp", "-loglevel", "error"], ["paplay"], ["aplay", "-q"]):
             try:
                 subprocess.run([*player, str(clip)], check=True)
@@ -497,9 +498,11 @@ def _cmd_pack_audition(args: argparse.Namespace) -> int:
             except KeyboardInterrupt:
                 return 0
             except subprocess.CalledProcessError as e:
-                print(f"  ({player[0]} failed: {e})", file=sys.stderr)
-                return 2
-        print("error: no audio player found (tried ffplay, paplay, aplay)", file=sys.stderr)
+                failed.append(f"{player[0]} ({e})")  # present but errored — try the next player
+        if failed:
+            print(f"error: playback failed: {'; '.join(failed)}", file=sys.stderr)
+        else:
+            print("error: no audio player found (tried ffplay, paplay, aplay)", file=sys.stderr)
         return 2
 
 
@@ -531,7 +534,7 @@ def _cmd_pack_delete(args: argparse.Namespace) -> int:
         if linked:
             print(f"  note: {len(linked)} voiceprint(s) extracted from it stay in the library.")
         try:
-            resp = input("  type 'yes' to confirm: ")
+            resp = input("  confirm delete [y/N]: ")
         except (EOFError, KeyboardInterrupt):
             print("\ncancelled.", file=sys.stderr)
             return 1

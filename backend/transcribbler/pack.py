@@ -466,14 +466,17 @@ def _rewrite_blob(blob_path: Path, *, new_ir: dict, new_sidecar: str, drop_audio
     try:
         with tarfile.open(blob_path, "r:gz") as src, tarfile.open(tmp, "w:gz") as dst:
             for member in src.getmembers():
-                if member.name == "record.ir.json":
-                    _add_bytes(dst, member.name, (json.dumps(new_ir, indent=2) + "\n").encode())
-                elif member.name == "session.md":
-                    _add_bytes(dst, member.name, new_sidecar.encode())
+                if member.name in ("record.ir.json", "session.md"):
+                    continue  # the two authored documents are (re)written below, always
                 elif drop_audio and member.name.startswith("audio/"):
                     continue
                 elif member.isfile():
                     _add_bytes(dst, member.name, _member_bytes(src, member.name) or b"")
+            # Write the two documents unconditionally — replacing them if the source carried them,
+            # adding them if it didn't. A pack somehow missing its embedded session.md must not
+            # come out of a rewrite still missing it (the §6 drift the loose/embedded split forbids).
+            _add_bytes(dst, "record.ir.json", (json.dumps(new_ir, indent=2) + "\n").encode())
+            _add_bytes(dst, "session.md", new_sidecar.encode())
         os.replace(tmp, blob_path)
     finally:
         Path(tmp).unlink(missing_ok=True)
@@ -489,6 +492,8 @@ def relabel(pack: PackInfo, speaker_id: str, name: str) -> PackInfo:
     """
     from .ir import validate_ir
 
+    if not name.strip():
+        raise ValueError("a voiceprint name cannot be empty")
     ir = read_record(pack.blob_path)
     spk = next((s for s in ir["speakers"] if s["id"] == speaker_id), None)
     if spk is None:
