@@ -294,3 +294,259 @@ def extract(blob_path: Path) -> list[library.Voiceprint]:
         vp = library.enroll(name, vector, uid=f"{pack_uid}-{slug(name)}", source=source_ref)
         updates.append(vp)
     return updates
+
+
+# ---- lifecycle: discover, inspect, relabel, link (spec §7–§9) ----------------
+
+
+@dataclass
+class PackInfo:
+    """One discovered pack: the authoritative blob, its (optional) loose sidecar, its metadata.
+
+    ``meta`` is the ``.md`` frontmatter — read from the loose sidecar when present, else from the
+    blob's embedded ``session.md`` (spec §6: the embedded copy is authoritative if the loose one
+    is lost). ``uid`` comes from the frontmatter ``id``, falling back to the blob filename (§3.1).
+    """
+
+    uid: str
+    blob_path: Path
+    md_path: Path | None
+    meta: dict
+
+
+def _uid_from_blob(name: str) -> str:
+    """Recover the pack uid from a blob filename (`…-<uid>-blob.tar.gz`, spec §3.1)."""
+    return name.removesuffix("-blob.tar.gz").rsplit("-", 1)[-1]
+
+
+def _member_bytes(tar: tarfile.TarFile, name: str) -> bytes | None:
+    """Read one archive member as bytes; ``None`` if absent or not a regular file."""
+    try:
+        f = tar.extractfile(name)
+    except KeyError:
+        return None
+    return f.read() if f is not None else None
+
+
+def read_record(blob_path: Path) -> dict:
+    """The pack's Canonical IR (``record.ir.json``) — the source of truth."""
+    with tarfile.open(blob_path, "r:gz") as tar:
+        data = _member_bytes(tar, "record.ir.json")
+    if data is None:
+        raise ValueError(f"{blob_path.name}: no record.ir.json")
+    return json.loads(data)
+
+
+def _embedded_meta(blob_path: Path) -> dict:
+    """Frontmatter from the blob's embedded ``session.md`` (spec §6 fallback)."""
+    with tarfile.open(blob_path, "r:gz") as tar:
+        data = _member_bytes(tar, "session.md")
+    return frontmatter.parse(data.decode()) if data else {}
+
+
+def find_packs(store: Path | None = None) -> list[PackInfo]:
+    """Discover every pack under ``store`` (default: the sessions dir), newest blob first.
+
+    Discovery is **recursive**: a `listen` session lands its pair in its own
+    ``sessions/<id>/`` subdir (beside the operator's transcript) while an ``enroll`` pack lands
+    flat in ``sessions/`` — both are found. Blobs are authoritative, so the walk keys on
+    ``*-blob.tar.gz``; a loose ``.md`` sharing the blob's directory and naming it via its
+    ``blob:`` frontmatter edge (§9) supplies the metadata, else the embedded ``session.md`` does
+    (§6) — so a pack whose sidecar was deleted still lists. Ordered by the date-prefixed blob
+    name, newest first, across subdirs.
+    """
+    store = store or paths.sessions_dir()
+    if not store.exists():
+        return []
+    md_by_key: dict[tuple[Path, str], tuple[Path, dict]] = {}
+    for md in store.rglob("*.md"):
+        m = frontmatter.parse(md.read_text())
+        blob = m.get("blob")
+        if isinstance(blob, str):
+            md_by_key[(md.parent, blob)] = (md, m)  # the pair shares a directory (spec §2)
+
+    packs: list[PackInfo] = []
+    for blob in sorted(store.rglob("*-blob.tar.gz"), key=lambda p: p.name, reverse=True):
+        linked = md_by_key.get((blob.parent, blob.name))
+        if linked is not None:
+            md_path, meta = linked
+        else:
+            md_path, meta = None, _embedded_meta(blob)
+        uid = meta.get("id") or _uid_from_blob(blob.name)
+        packs.append(PackInfo(uid=str(uid), blob_path=blob, md_path=md_path, meta=meta))
+    return packs
+
+
+def load_pack(ident: str, store: Path | None = None) -> PackInfo:
+    """Resolve one pack by uid (exact or unique prefix) or by a blob/`.md` path.
+
+    Raises ``ValueError`` if nothing matches, or if a uid prefix is ambiguous.
+    """
+    p = Path(ident)
+    if p.suffix == ".gz" and p.exists():  # a direct blob path
+        meta = _embedded_meta(p)
+        return PackInfo(str(meta.get("id") or _uid_from_blob(p.name)), p, None, meta)
+
+    packs = find_packs(store)
+    exact = [pk for pk in packs if pk.uid == ident]
+    if exact:
+        return exact[0]
+    pref = [pk for pk in packs if pk.uid.startswith(ident)]
+    if len(pref) == 1:
+        return pref[0]
+    if len(pref) > 1:
+        raise ValueError(f"ambiguous pack id {ident!r}: matches {', '.join(pk.uid for pk in pref)}")
+    raise ValueError(f"no pack matching {ident!r}")
+
+
+def pack_details(pack: PackInfo) -> dict:
+    """Per-speaker stats + audio presence for ``show`` — folds the IR turns by speaker.
+
+    Returns ``{meta, has_audio, duration_s, speakers: [{id, name, turns, speech_s, clip}]}``.
+    ``clip`` is whether an isolated ``audio/<id>.*`` exists (the audition/relabel substrate).
+    """
+    ir = read_record(pack.blob_path)
+    with tarfile.open(pack.blob_path, "r:gz") as tar:
+        members = tar.getnames()
+    audio = {m for m in members if m.startswith("audio/")}
+
+    stats: dict[str, dict] = {}
+    for t in ir["turns"]:
+        s = stats.setdefault(t["speaker_id"], {"turns": 0, "speech_s": 0.0})
+        s["turns"] += 1
+        s["speech_s"] += t["end"] - t["start"]
+
+    speakers = []
+    for sp in ir["speakers"]:
+        st = stats.get(sp["id"], {"turns": 0, "speech_s": 0.0})
+        has_clip = any(m.startswith(f"audio/{sp['id']}.") for m in audio)
+        speakers.append({"id": sp["id"], "name": _label_of(sp),
+                         "turns": st["turns"], "speech_s": st["speech_s"], "clip": has_clip})
+    return {
+        "meta": pack.meta,
+        "has_audio": bool(audio),
+        "duration_s": float(ir["source"]["duration_s"]),
+        "speakers": speakers,
+    }
+
+
+def read_clip(pack: PackInfo, speaker_id: str, dst: Path) -> Path:
+    """Extract a speaker's isolated clip (``audio/<id>.*``) from the blob to ``dst``.
+
+    Returns the written path (``dst`` with the clip's real suffix). Raises ``ValueError`` if the
+    pack carries no clip for that speaker (finalized/``--no-audio``, or an unknown id).
+    """
+    with tarfile.open(pack.blob_path, "r:gz") as tar:
+        member = next((m for m in tar.getnames() if m.startswith(f"audio/{speaker_id}.")), None)
+        if member is None:
+            raise ValueError(f"pack {pack.uid} has no audio clip for {speaker_id!r}")
+        data = _member_bytes(tar, member)
+    if data is None:
+        raise ValueError(f"pack {pack.uid}: clip {member} is not readable")
+    out = dst.with_suffix(Path(member).suffix)
+    out.write_bytes(data)
+    return out
+
+
+def _sidecar_for(ir: dict, meta: dict) -> str:
+    """Rebuild the ``.md`` sidecar (frontmatter + rendered transcript) — mirrors write_pack."""
+    return _frontmatter(meta) + "\n" + render.to_markdown(ir)
+
+
+def _rewrite_blob(blob_path: Path, *, new_ir: dict, new_sidecar: str, drop_audio: bool = False) -> None:
+    """Rewrite a blob in place, replacing record.ir.json + session.md, passing other members through.
+
+    The one primitive under every mutation: relabel (replace the two documents) and, later,
+    finalize (``drop_audio=True`` strips ``audio/``). Written to a temp sibling and atomically
+    swapped, so a crash mid-rewrite can never truncate the authoritative blob. Members are
+    re-normalized (mtime/owner stripped) exactly as write_pack does, so a rewrite leaks no
+    host metadata.
+    """
+    tmp = blob_path.parent / f".{blob_path.name}.partial"
+    try:
+        with tarfile.open(blob_path, "r:gz") as src, tarfile.open(tmp, "w:gz") as dst:
+            for member in src.getmembers():
+                if member.name == "record.ir.json":
+                    _add_bytes(dst, member.name, (json.dumps(new_ir, indent=2) + "\n").encode())
+                elif member.name == "session.md":
+                    _add_bytes(dst, member.name, new_sidecar.encode())
+                elif drop_audio and member.name.startswith("audio/"):
+                    continue
+                elif member.isfile():
+                    _add_bytes(dst, member.name, _member_bytes(src, member.name) or b"")
+        os.replace(tmp, blob_path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+def relabel(pack: PackInfo, speaker_id: str, name: str) -> PackInfo:
+    """Rename a speaker in the pack: set its ``display_name`` and re-pack (blob + loose sidecar).
+
+    The rewrite refreshes ``record.ir.json`` (the identity the next ``extract`` reads), the
+    embedded ``session.md``, its ``participants`` mirror, and the loose ``.md`` view. This turns
+    an anonymous diarized remote (``S1``) into a named speaker whose embedding + isolated clip
+    then fold into the library under the right name — the capture→named-voiceprint path.
+    """
+    from .ir import validate_ir
+
+    ir = read_record(pack.blob_path)
+    spk = next((s for s in ir["speakers"] if s["id"] == speaker_id), None)
+    if spk is None:
+        have = ", ".join(s["id"] for s in ir["speakers"])
+        raise ValueError(f"pack {pack.uid} has no speaker {speaker_id!r} (has: {have})")
+    spk["display_name"] = name
+    validate_ir(ir)  # stay schema-valid; a bad relabel fails here, before touching the blob
+
+    meta = dict(pack.meta)
+    meta["participants"] = [_label_of(s) for s in ir["speakers"]]
+    sidecar = _sidecar_for(ir, meta)
+    _rewrite_blob(pack.blob_path, new_ir=ir, new_sidecar=sidecar)
+    if pack.md_path is not None:
+        pack.md_path.write_text(sidecar)
+    return PackInfo(pack.uid, pack.blob_path, pack.md_path, meta)
+
+
+def delete_pack(pack: PackInfo) -> None:
+    """Delete a pack: remove its blob and loose sidecar, tidying an emptied session subdir.
+
+    Deletes the pack, **not** the identities it taught: a voiceprint compounds from several packs
+    (its running-mean centroid + ``sources`` graph), so pruning one is a separate, deliberate act,
+    not a side effect of dropping a session. A `listen` pack lives in its own ``sessions/<id>/``
+    subdir; that dir is removed once emptied, but never the top-level sessions store itself.
+    """
+    pack.blob_path.unlink(missing_ok=True)
+    if pack.md_path is not None:
+        pack.md_path.unlink(missing_ok=True)
+    parent = pack.blob_path.parent
+    if parent.resolve() != paths.sessions_dir().resolve():
+        try:
+            parent.rmdir()  # only succeeds if now empty
+        except OSError:
+            pass
+
+
+def link_voiceprints(pack: PackInfo, voiceprints: list[library.Voiceprint]) -> PackInfo:
+    """Write the session→voiceprint back-edge (spec §9) after an extract, closing the graph.
+
+    ``extract`` records the voiceprint→session ``sources`` edge; this writes the matching
+    ``voiceprints:`` edge (relative paths to ``library/<uid>.md``) onto the session's frontmatter,
+    merged/deduped with any existing edges, in both the loose ``.md`` and the embedded copy.
+    """
+    if not voiceprints:
+        return pack
+    edges = {
+        os.path.relpath((paths.library_dir() / f"{vp.uid}.md").resolve(), pack.blob_path.parent)
+        for vp in voiceprints
+    }
+    existing = pack.meta.get("voiceprints") or []
+    merged = sorted({*existing, *edges})
+    if merged == existing:
+        return pack
+    meta = dict(pack.meta)
+    meta["voiceprints"] = merged
+    ir = read_record(pack.blob_path)
+    sidecar = _sidecar_for(ir, meta)
+    _rewrite_blob(pack.blob_path, new_ir=ir, new_sidecar=sidecar)
+    if pack.md_path is not None:
+        pack.md_path.write_text(sidecar)
+    return PackInfo(pack.uid, pack.blob_path, pack.md_path, meta)
