@@ -40,18 +40,22 @@ install: ## Install `transcribbler` + `transcribbler-serve` to ~/.local/bin (uv 
 	@echo "  relative to this repo, so keep the working tree in place. Move it? re-run 'make install'."
 	@case ":$$PATH:" in *":$(BIN):"*) ;; *) echo "NOTE: $(BIN) is not on PATH — add it, or run 'uv tool update-shell'";; esac
 
-uninstall: service-uninstall ## Remove the installed CLI (and the systemd --user unit)
+uninstall: service-uninstall ## Remove the installed CLI, the systemd unit, and the diarizer venv
 	uv tool uninstall $(TOOL)
+	@rm -rf backend/diarizer/.venv && echo "removed diarizer venv (backend/diarizer/.venv)"
 
-reinstall: ## Reinstall the CLI in place (pick up new entrypoints / metadata)
-	$(MAKE) uninstall
+reinstall: ## Reinstall the CLI in place (pick up new entrypoints); leaves the service unit
+	-uv tool uninstall $(TOOL)
 	$(MAKE) install
 
 status: ## Show what's installed: CLI entrypoints, uv tool, and the service state
 	@echo "== CLI =="; command -v transcribbler || echo "  transcribbler: not on PATH"
 	@command -v transcribbler-serve || echo "  transcribbler-serve: not on PATH"
 	@echo "== uv tool =="; uv tool list 2>/dev/null | grep -A2 '^$(TOOL)' || echo "  $(TOOL): not installed"
-	@echo "== service =="; systemctl --user is-enabled $(UNIT) 2>/dev/null && systemctl --user is-active $(UNIT) 2>/dev/null || echo "  $(UNIT): not enabled"
+	@echo "== service =="; \
+	  printf "  enabled: %s   active: %s\n" \
+	    "$$(systemctl --user is-enabled $(UNIT) 2>/dev/null || echo no)" \
+	    "$$(systemctl --user is-active $(UNIT) 2>/dev/null || echo no)"
 
 ## --- service (systemd --user, ADR-0007) ---
 

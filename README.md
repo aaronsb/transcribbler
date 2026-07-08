@@ -73,8 +73,10 @@ restarts on failure — the unit ships in `packaging/`:
 ```bash
 make service-install     # copy packaging/transcribbler.service → ~/.config/systemd/user
 make service-enable      # systemctl --user enable --now (starts it, and on every login)
-make service-status      # …status         make service-logs   # journald, follow
-make service-stop        # …stop           make service-uninstall
+make service-status      # current status
+make service-logs        # follow journald output
+make service-stop        # stop (stays enabled)
+make service-uninstall   # disable + remove the unit
 ```
 
 Secrets/overrides (e.g. `HF_TOKEN=…`) go in `~/.config/transcribbler/env` (the
