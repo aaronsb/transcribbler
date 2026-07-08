@@ -97,12 +97,17 @@ def persist_session_pack(
     out_path: Path,
     tags: list[str] | None = None,
     clip_dir: Path | None = None,
+    flagged: set[str] | None = None,
 ) -> pack.PackResult:
     """Build the IR from ``turns`` and write a session pack beside ``out_path``.
 
     ``centroids`` is the gallery's ``{sid: centroid}`` seed; ``session_wav`` (if present) is the
     assembled stereo audio to cut speaker-isolated clips from — the operator from the mic
     channel, each remote from the meeting channel, by its own turn spans.
+
+    ``flagged`` is the set of live speaker *labels* the operator flagged to remember; each is
+    resolved to its canonical pack id (a label that never reached the transcript is dropped)
+    and stamped as the pack's ``pending_enrollment`` for the guided ``pack enroll`` walk.
     """
     ir = build_live_ir(
         turns,
@@ -135,6 +140,10 @@ def persist_session_pack(
             session_wav, spans_by_id, channel_by_id, dst_dir=clip_dir or session_wav.parent
         )
 
+    # Resolve flagged live labels → canonical pack ids via the same id_by_label the clips use;
+    # a flagged label absent from the IR (never emitted a turn) is silently dropped.
+    pending = sorted(id_by_label[lbl] for lbl in (flagged or set()) if lbl in id_by_label)
+
     return pack.write_pack(
         ir,
         title=out_path.stem,
@@ -143,4 +152,5 @@ def persist_session_pack(
         audio=clips,
         dest_dir=out_path.parent,
         md_path=out_path,
+        pending=pending,
     )
