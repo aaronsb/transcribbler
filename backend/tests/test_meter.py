@@ -49,7 +49,7 @@ def test_candidates_flags_detection_pick(monkeypatch):
     monkeypatch.setattr(capture, "_short_map", lambda kind: short[kind])
     monkeypatch.setattr(capture, "_blocks", lambda kind: blocks[kind])
     monkeypatch.setattr(capture, "_pactl", lambda *a: defaults[a[0]])
-    monkeypatch.setattr(capture, "detect_paths", lambda app: Paths(mic="micA", meeting="sinkA.monitor"))
+    monkeypatch.setattr(capture, "detect_paths", lambda app: Paths(mic="micA", meeting=("sinkA.monitor",)))
 
     srcs = meter.candidates("Google Chrome")
     by_name = {s.name: s for s in srcs}
