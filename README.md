@@ -36,8 +36,12 @@ Live ASR/diarization progress streams to stderr when it's a TTY (`--progress` /
 `[asr] prompt` in the profile).
 
 > Not installed yet? Prefix any command with `uv run --project backend`, e.g.
-> `uv run --project backend transcribbler probe`. `make install` puts the
-> `transcribbler` launcher on `~/.local/bin` so you can drop the prefix.
+> `uv run --project backend transcribbler probe`. `make install` puts both the
+> `transcribbler` and `transcribbler-serve` entrypoints on `~/.local/bin` (an
+> editable [uv tool](https://docs.astral.sh/uv/) — ADR-0030) so you can drop the
+> prefix; `make uninstall` removes them. The install is **editable**, so it reads
+> its diarizer sidecar and `.env.hf` from this working tree — keep the repo in
+> place (moved it? re-run `make install`).
 
 ### Run as a service (ADR-0018)
 
@@ -62,6 +66,22 @@ Endpoints live under `/v1`: `POST /jobs`, `GET /jobs/{id}` (+ `/events`,
 Clients send a profile **name** (server-side allowlist), never a path. Jobs run
 FIFO single-flight for now; the VRAM-budget scheduler + live mode (ADR-0019) and
 TCP bearer-token/TLS auth (ADR-0020) are separate, upcoming work.
+
+Run it under **`systemd --user`** (ADR-0007/0030) so it starts on login and
+restarts on failure — the unit ships in `packaging/`:
+
+```bash
+make service-install     # copy packaging/transcribbler.service → ~/.config/systemd/user
+make service-enable      # systemctl --user enable --now (starts it, and on every login)
+make service-status      # current status
+make service-logs        # follow journald output
+make service-stop        # stop (stays enabled)
+make service-uninstall   # disable + remove the unit
+```
+
+Secrets/overrides (e.g. `HF_TOKEN=…`) go in `~/.config/transcribbler/env` (the
+unit's optional `EnvironmentFile`). `make status` shows what's installed; `make
+dist` builds a wheel/sdist to install elsewhere.
 
 ### Rust client (ADR-0017)
 

@@ -1,0 +1,56 @@
+name: install
+
+on:
+  push:
+    paths:
+      - "backend/**"
+      - "packaging/**"
+      - "Makefile"
+      - ".github/workflows/install.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - "packaging/**"
+      - "Makefile"
+      - ".github/workflows/install.yml"
+
+jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install (editable uv tool) exposes both entrypoints
+        run: uv tool install --editable ./backend --force
+
+      - name: Both entrypoints resolve and run
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          transcribbler --version
+          transcribbler-serve --help
+
+      - name: Editable keeps package-relative paths in the repo
+        run: |
+          PY="$(uv tool dir)/transcribbler-backend/bin/python"
+          "$PY" - <<'PY'
+          import transcribbler, transcribbler.diarizer_daemon as d
+          assert transcribbler.__file__.endswith("backend/transcribbler/__init__.py"), transcribbler.__file__
+          assert str(d._SIDECAR_DIR).endswith("backend/diarizer"), d._SIDECAR_DIR
+          print("editable resolution OK:", transcribbler.__file__)
+          PY
+
+      - name: Validate the systemd unit (best-effort)
+        run: |
+          if command -v systemd-analyze >/dev/null; then
+            systemd-analyze verify packaging/transcribbler.service || true
+          else
+            echo "systemd-analyze absent; skipping unit verification"
+          fi
+
+      - name: Uninstall removes both entrypoints
+        run: |
+          uv tool uninstall transcribbler-backend
+          test ! -e "$HOME/.local/bin/transcribbler"
+          test ! -e "$HOME/.local/bin/transcribbler-serve"
+          echo "clean uninstall confirmed"

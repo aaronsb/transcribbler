@@ -36,6 +36,7 @@ Format: lightweight [MADR](https://adr.github.io/madr/)-style. One decision per 
 | [0027](0027-robust-online-speaker-attribution.md) | Robust online speaker attribution — overlapping-window diarization + turn-aware attribution | Accepted |
 | [0028](0028-session-resource-pack-and-regeneration.md) | The session pack — one open, self-describing unit of persistence + universal voiceprint extraction | Accepted |
 | [0029](0029-pack-lifecycle-and-teaching.md) | Pack lifecycle operations — packs as curatable bundles that teach the voiceprint library | Accepted |
+| [0030](0030-installer-and-service-lifecycle.md) | Installer & service lifecycle — editable uv-tool install + a systemd --user unit | Accepted |
 
 ## Conventions
 

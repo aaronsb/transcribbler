@@ -16,24 +16,74 @@ SAMPLE        := $(WHISPER_DIR)/samples/jfk.wav
 
 CLIENT        := clients/cli/Cargo.toml
 
-.PHONY: help install uninstall build test check lint format validate-schemas backend-smoke clean update venv client client-check
+# uv-tool package name (backend/pyproject.toml [project].name) + the systemd --user unit.
+TOOL          := transcribbler-backend
+UNIT          := transcribbler.service
+UNIT_SRC      := packaging/$(UNIT)
+UNIT_DST      := $(HOME)/.config/systemd/user
+
+.PHONY: help install uninstall reinstall status update build test check lint format \
+        validate-schemas backend-smoke clean venv client client-check dist \
+        service-install service-enable service-disable service-stop service-status \
+        service-logs service-uninstall
 
 help: ## List available targets
 	@awk 'BEGIN{FS=":.*##"} /^[a-zA-Z0-9_-]+:.*##/{printf "  \033[36m%-16s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 
-## --- setup ---
+## --- setup (lifecycle) ---
 
-install: ## Install Python deps + put a `transcribbler` launcher on PATH (~/.local/bin)
-	uv sync --project backend
+install: ## Install `transcribbler` + `transcribbler-serve` to ~/.local/bin (uv tool, editable) + diarizer venv
+	uv tool install --editable ./backend --force
 	uv sync --project backend/diarizer
-	@mkdir -p "$(BIN)"
-	@printf '#!/usr/bin/env bash\nexec uv run --project "%s/backend" transcribbler "$$@"\n' "$(CURDIR)" > "$(BIN)/transcribbler"
-	@chmod +x "$(BIN)/transcribbler"
-	@echo "installed: $(BIN)/transcribbler -> uv run --project $(CURDIR)/backend"
-	@case ":$$PATH:" in *":$(BIN):"*) ;; *) echo "NOTE: $(BIN) is not on PATH — add it to use 'transcribbler' directly";; esac
+	@echo "installed: transcribbler + transcribbler-serve -> $(BIN) (uv tool, editable)"
+	@echo "  editable: the diarizer sidecar (uv run --project backend/diarizer) and .env.hf resolve"
+	@echo "  relative to this repo, so keep the working tree in place. Move it? re-run 'make install'."
+	@case ":$$PATH:" in *":$(BIN):"*) ;; *) echo "NOTE: $(BIN) is not on PATH — add it, or run 'uv tool update-shell'";; esac
 
-uninstall: ## Remove the installed launcher
-	@rm -f "$(BIN)/transcribbler" && echo "removed $(BIN)/transcribbler"
+uninstall: service-uninstall ## Remove the installed CLI, the systemd unit, and the diarizer venv
+	uv tool uninstall $(TOOL)
+	@rm -rf backend/diarizer/.venv && echo "removed diarizer venv (backend/diarizer/.venv)"
+
+reinstall: ## Reinstall the CLI in place (pick up new entrypoints); leaves the service unit
+	-uv tool uninstall $(TOOL)
+	$(MAKE) install
+
+status: ## Show what's installed: CLI entrypoints, uv tool, and the service state
+	@echo "== CLI =="; command -v transcribbler || echo "  transcribbler: not on PATH"
+	@command -v transcribbler-serve || echo "  transcribbler-serve: not on PATH"
+	@echo "== uv tool =="; uv tool list 2>/dev/null | grep -A2 '^$(TOOL)' || echo "  $(TOOL): not installed"
+	@echo "== service =="; \
+	  printf "  enabled: %s   active: %s\n" \
+	    "$$(systemctl --user is-enabled $(UNIT) 2>/dev/null || echo no)" \
+	    "$$(systemctl --user is-active $(UNIT) 2>/dev/null || echo no)"
+
+## --- service (systemd --user, ADR-0007) ---
+
+service-install: ## Install the systemd --user unit into ~/.config/systemd/user + reload
+	@mkdir -p "$(UNIT_DST)"
+	install -m 644 "$(UNIT_SRC)" "$(UNIT_DST)/$(UNIT)"
+	systemctl --user daemon-reload
+	@echo "installed unit: $(UNIT_DST)/$(UNIT) — enable it with 'make service-enable'"
+
+service-enable: service-install ## Enable + start the service now and on every login
+	systemctl --user enable --now $(UNIT)
+
+service-disable: ## Stop + disable the service (keeps the unit file)
+	-systemctl --user disable --now $(UNIT)
+
+service-stop: ## Stop the service (leaves it enabled)
+	-systemctl --user stop $(UNIT)
+
+service-status: ## Show the service status
+	-systemctl --user status $(UNIT) --no-pager
+
+service-logs: ## Tail the service logs (journald)
+	journalctl --user -u $(UNIT) -f
+
+service-uninstall: ## Disable the service and remove the unit file
+	-systemctl --user disable --now $(UNIT) 2>/dev/null
+	@rm -f "$(UNIT_DST)/$(UNIT)" && systemctl --user daemon-reload 2>/dev/null || true
+	@echo "removed unit: $(UNIT_DST)/$(UNIT)"
 
 build: ## Build whisper.cpp (Vulkan) + fetch the model (WHISPER_DIR, WHISPER_MODEL)
 	@test -d "$(WHISPER_DIR)" || git clone --depth 1 https://github.com/ggml-org/whisper.cpp "$(WHISPER_DIR)"
@@ -41,7 +91,7 @@ build: ## Build whisper.cpp (Vulkan) + fetch the model (WHISPER_DIR, WHISPER_MOD
 	cmake --build "$(WHISPER_DIR)/build" -j
 	@test -f "$(WHISPER_DIR)/models/ggml-$(WHISPER_MODEL).bin" || bash "$(WHISPER_DIR)/models/download-ggml-model.sh" $(WHISPER_MODEL)
 
-update: ## Pull latest, re-sync deps, refresh the launcher
+update: ## Pull latest, re-sync deps, reinstall the CLI
 	git pull --ff-only
 	$(MAKE) install
 
@@ -78,8 +128,12 @@ backend-smoke: ## End-to-end ASR smoke on the whisper.cpp sample (skips if absen
 	@test -f "$(SAMPLE)" || { echo "skip: $(SAMPLE) not found (run 'make build' first)"; exit 0; }
 	uv run --project backend transcribbler transcribe "$(SAMPLE)" -p profiles/desktop-vulkan.toml --no-diarize -f md
 
+dist: ## Build a distributable backend wheel + sdist into dist/ (uv build)
+	uv build --project backend -o dist
+	@echo "built: dist/ — install elsewhere with 'uv tool install <wheel>' or 'pipx install <wheel>'"
+
 ## --- housekeeping ---
 
-clean: ## Remove Python venvs and caches (keeps the whisper.cpp build)
-	rm -rf $(VENV) backend/.venv backend/diarizer/.venv
+clean: ## Remove Python venvs, build artifacts, and caches (keeps the whisper.cpp build)
+	rm -rf $(VENV) backend/.venv backend/diarizer/.venv dist
 	find backend -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true

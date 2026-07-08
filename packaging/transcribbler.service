@@ -1,0 +1,32 @@
+# transcribbler transcription service — systemd --user unit (ADR-0007, ADR-0018).
+#
+# Install with `make service-install` (copies this into ~/.config/systemd/user/ and
+# reloads), then `make service-enable` to start it now and on every login. The unit runs
+# the *installed* `transcribbler-serve` entrypoint (put on PATH by `make install`), which
+# binds a Unix socket under $XDG_RUNTIME_DIR by default — no port, no auth, the OS enforces
+# access via the per-user runtime dir (ADR-0018).
+#
+# Supervisor-agnostic (ADR-0007): the process logs to stdout/stderr — journald captures it,
+# reachable with `make service-logs`. It makes no systemd-specific assumptions, so the same
+# binary runs as PID 1 in a container on hosts that prefer docker.
+
+[Unit]
+Description=transcribbler transcription service
+Documentation=https://github.com/aaronsb/transcribbler
+
+[Service]
+Type=simple
+# %h is the invoking user's home; `make install` puts the entrypoint here.
+ExecStart=%h/.local/bin/transcribbler-serve
+Restart=on-failure
+RestartSec=2
+# A --user unit inherits a minimal PATH that excludes ~/.local/bin and ~/.cargo/bin.
+# The diarizer daemon shells `uv` (by name) to launch its sidecar venv, so uv — wherever
+# it was installed — must be findable, or diarize jobs fail at runtime though the socket binds.
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+# Optional secrets/overrides (e.g. HF_TOKEN=…). The leading '-' makes it non-fatal
+# when absent, so the service still starts before you've written one.
+EnvironmentFile=-%h/.config/transcribbler/env
+
+[Install]
+WantedBy=default.target
