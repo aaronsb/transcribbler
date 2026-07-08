@@ -21,6 +21,7 @@ system defaults — the meeting is frequently not on the default sink.
 from __future__ import annotations
 
 import array
+import json
 import math
 import re
 import shutil
@@ -41,13 +42,17 @@ from .session_gallery import SessionGallery
 Log = Callable[[str], None]
 
 
-# ---- audio-path detection (match activated routes, not defaults) ------------
+class SourceError(RuntimeError):
+    """No usable audio source could be resolved (e.g. nothing is playing yet)."""
+
+
+# ---- audio-path detection (follow active routing, not defaults) -------------
 
 
 @dataclass(frozen=True)
 class Paths:
     mic: str  # PulseAudio/PipeWire source: the operator's (echo-cancelled) mic
-    meeting: str  # monitor source: where the meeting audio is actually played
+    meeting: tuple[str, ...]  # monitor source(s) the meeting is routed into; mixed to one channel
 
 
 def _pactl(*args: str) -> str:
@@ -105,45 +110,103 @@ def _mean_volume_db(source: str, secs: float = 1.5) -> float:
     return float(m.group(1)) if m else -120.0
 
 
-def detect_paths(app: str = "Google Chrome", log: Log | None = None) -> Paths:
-    """Resolve the meeting app's *activated* mic source and output monitor.
+def _pw_dump() -> list[dict]:
+    """Parse ``pw-dump`` — the live PipeWire object graph; ``[]`` if unavailable."""
+    try:
+        out = subprocess.run(["pw-dump"], capture_output=True, text=True, timeout=10).stdout
+        return json.loads(out)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
 
-    Meeting output: the app may drive several sinks; probe each candidate's
-    monitor and pick the one with real energy (the default sink is often silent).
-    Mic: the source the app's input stream captures from, else the system default.
+
+def _routed_sources(app: str, dump: list[dict] | None = None) -> tuple[str | None, list[str]]:
+    """Follow the app's *active* PipeWire routing to its capturable sources.
+
+    The active link graph is ground truth: a one-shot guess or a default-sink
+    fallback strands capture on a monitor nothing plays into (the silent-capture
+    bug). Instead we read where the app is really wired *right now* —
+
+    - **meeting**: every sink the app's audio-output node is linked into, captured
+      at that sink's ``.monitor``. The app may split across several sinks (an effects
+      sink plus a real device); all are returned so the caller can mix them, since
+      which one carries audible audio drifts and only the live signal knows.
+    - **mic**: the source the app's audio-input node is linked *from*.
+
+    Returns ``(mic | None, [meeting monitors])``. Matching is loose (``app`` as a
+    substring of ``node.name``/``application.name``) so "Google Chrome" also finds
+    the "Google Chrome input" capture stream.
+    """
+    dump = _pw_dump() if dump is None else dump
+    nodes: dict[int, dict] = {}
+    links: list[tuple[int | None, int | None]] = []
+    for o in dump:
+        t = o.get("type")
+        if t == "PipeWire:Interface:Node":
+            nid = o.get("id")
+            if nid is not None:  # stay defensive: a malformed dump must not raise
+                nodes[nid] = (o.get("info", {}) or {}).get("props", {}) or {}
+        elif t == "PipeWire:Interface:Link":
+            info = o.get("info", {}) or {}
+            links.append((info.get("output-node-id"), info.get("input-node-id")))
+
+    a = app.lower()
+
+    def matches(p: dict) -> bool:
+        hay = ((p.get("node.name") or "") + " " + (p.get("application.name") or "")).lower()
+        return a in hay
+
+    out_nodes = {i for i, p in nodes.items()
+                 if p.get("media.class") == "Stream/Output/Audio" and matches(p)}
+    in_nodes = {i for i, p in nodes.items()
+                if p.get("media.class") == "Stream/Input/Audio" and matches(p)}
+
+    meeting: list[str] = []
+    for o_id, i_id in links:
+        if o_id in out_nodes:
+            sink = nodes.get(i_id, {})
+            if sink.get("media.class") == "Audio/Sink":
+                name = sink.get("node.name")
+                if name and f"{name}.monitor" not in meeting:
+                    meeting.append(f"{name}.monitor")
+
+    mic: str | None = None
+    for o_id, i_id in links:
+        if i_id in in_nodes:
+            mic = nodes.get(o_id, {}).get("node.name")
+            if mic:
+                break
+
+    return mic, meeting
+
+
+def detect_paths(app: str = "Google Chrome", log: Log | None = None) -> Paths:
+    """Resolve the meeting app's mic source and meeting monitor(s) from live routing.
+
+    Meeting: every sink the app is *actively routed into*, captured at its monitor —
+    no default-sink fallback, because a monitor nothing is routed to is silent, which
+    is exactly the dead-capture failure this avoids. An empty result is honest: the
+    caller reports "nothing is playing yet" rather than recording silence.
+    Mic: the source the app captures from (graph → pactl input stream → default).
     """
     say = log or (lambda _m: None)
-    sinks, sources = _short_map("sinks"), _short_map("sources")
+    mic, meeting = _routed_sources(app)
 
-    # meeting output — candidate monitors from the app's playback streams
-    cand: list[str] = []
-    for b in _blocks("sink-inputs"):
-        if app.lower() in b.get("app", "").lower():
-            name = sinks.get(b["route"])
-            if name and f"{name}.monitor" not in cand:
-                cand.append(f"{name}.monitor")
-    if not cand:  # app not playing anywhere we can see — fall back to default sink
-        cand = [f"{_pactl('get-default-sink').strip()}.monitor"]
+    if not mic:  # app isn't capturing — its pactl input stream, else the default source
+        sources = _short_map("sources")
+        for b in _blocks("source-outputs"):
+            if app.lower() in b.get("app", "").lower():
+                mic = sources.get(b["route"])
+                break
+        if not mic:
+            mic = _pactl("get-default-source").strip()
 
-    if len(cand) == 1:
-        meeting = cand[0]
+    if meeting:
+        for m in meeting:
+            say(f"  meeting : {m}")
     else:
-        scored = sorted(((c, _mean_volume_db(c)) for c in cand), key=lambda x: x[1], reverse=True)
-        say("  meeting-path probe: " + ", ".join(f"{c.split('.monitor')[0]}={v:.0f}dB" for c, v in scored))
-        meeting = scored[0][0]
-
-    # operator mic — the source the app's *input* stream uses
-    mic = None
-    for b in _blocks("source-outputs"):
-        if app.lower() in b.get("app", "").lower():
-            mic = sources.get(b["route"])
-            break
-    if not mic:
-        mic = _pactl("get-default-source").strip()
-
+        say(f"  meeting : (none — nothing is routed from {app!r} yet)")
     say(f"  mic     : {mic}")
-    say(f"  meeting : {meeting}")
-    return Paths(mic=mic, meeting=meeting)
+    return Paths(mic=mic, meeting=tuple(meeting))
 
 
 # ---- capture + transcribe loop ----------------------------------------------
@@ -187,17 +250,33 @@ _FFMPEG_OP_TIMEOUT = 60  # seconds; a per-chunk ffmpeg op hanging longer is drop
 _MAX_BACKLOG = 8         # unprocessed chunks tolerated before dropping the oldest (disk guard)
 
 
+def _capture_filter(n_meeting: int) -> str:
+    """Build the ffmpeg ``-filter_complex`` for mic(L) + a mix of ``n_meeting`` monitors(R).
+
+    Input 0 is the mic; inputs 1..n are the meeting monitors. Each is downmixed to mono
+    16k; the meeting monitors are *summed* (``amix normalize=0``) so the loud route stays
+    at full level regardless of how many silent routes ride alongside it (averaging would
+    attenuate it by the count of dead siblings). The result is joined mic→L, meeting→R.
+    """
+    if n_meeting < 1:
+        raise SourceError("no meeting sources to capture")  # guarded upstream; belt-and-suspenders
+    mic_part = "[0:a]aresample=16000,pan=mono|c0=c0[m]"
+    if n_meeting == 1:
+        mtg_parts = ["[1:a]aresample=16000,pan=mono|c0=c0[s]"]
+    else:
+        pre = [f"[{i}:a]aresample=16000,pan=mono|c0=c0[s{i}]" for i in range(1, n_meeting + 1)]
+        mix = "".join(f"[s{i}]" for i in range(1, n_meeting + 1)) + f"amix=inputs={n_meeting}:normalize=0[s]"
+        mtg_parts = [*pre, mix]
+    return ";".join([mic_part, *mtg_parts, "[m][s]join=inputs=2:channel_layout=stereo[o]"])
+
+
 def _ffmpeg_segmenter(paths: Paths, workdir: Path, segment_s: int, stderr) -> subprocess.Popen:
-    """Start ffmpeg capturing mic(L)+meeting(R) into rolling stereo 16k chunks."""
-    fc = (
-        "[0:a]aresample=16000,pan=mono|c0=c0[m];"
-        "[1:a]aresample=16000,pan=mono|c0=c0[s];"
-        "[m][s]join=inputs=2:channel_layout=stereo[o]"
-    )
-    cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-f", "pulse", "-i", paths.mic,
-        "-f", "pulse", "-i", paths.meeting,
+    """Start ffmpeg capturing mic(L) + a mix of the meeting monitor(s)(R) into 16k chunks."""
+    fc = _capture_filter(len(paths.meeting))
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "pulse", "-i", paths.mic]
+    for m in paths.meeting:
+        cmd += ["-f", "pulse", "-i", m]
+    cmd += [
         "-filter_complex", fc, "-map", "[o]",
         "-f", "segment", "-segment_time", str(segment_s), "-reset_timestamps", "1",
         str(workdir / "chunk_%05d.wav"),
@@ -440,6 +519,27 @@ def run_capture(
     linking (ADR-0027).
     """
     say = log or (lambda _m: None)
+
+    # Resolve sources first — before creating any dirs — so an early "nothing is
+    # routed yet" failure raises cleanly instead of stranding empty session/scratch
+    # dirs. CLI overrides win; otherwise follow the app's live routing (a --meeting
+    # override pins a single source; detection may return several to mix).
+    detected = detect_paths(app, log=say) if not (mic and meeting) else None
+    mic_final = mic or (detected.mic if detected else None)
+    if meeting:
+        meeting_final: tuple[str, ...] = (meeting,)
+    else:
+        meeting_final = detected.meeting if detected else ()
+    if not meeting_final:
+        raise SourceError(
+            f"no meeting audio: nothing is routed from {app!r} yet. Start the meeting "
+            f"playing first, run `transcribbler meter` to see live source levels, or "
+            f"pass --meeting <source>."
+        )
+    if not mic_final:
+        raise SourceError("no mic source resolved; pass --mic <source>.")
+    paths = Paths(mic=mic_final, meeting=meeting_final)
+
     work = workdir or (out_path.parent / f".{out_path.stem}.capture")
     work.mkdir(parents=True, exist_ok=True)
     retain = work / "retain"  # processed chunks kept here for the session pack's audio
@@ -453,16 +553,6 @@ def run_capture(
             src.replace(retain / f"chunk_{idx:05d}.wav")
         else:
             src.unlink(missing_ok=True)
-
-    paths = (
-        Paths(mic=mic, meeting=meeting)
-        if mic and meeting
-        else detect_paths(app, log=say)
-    )
-    if mic:
-        paths = Paths(mic=mic, meeting=paths.meeting)
-    if meeting:
-        paths = Paths(mic=paths.mic, meeting=meeting)
 
     use_diar = diarize and profile.diar.enabled
     gallery = SessionGallery(threshold, on_new_speaker=on_new_speaker) if use_diar else None

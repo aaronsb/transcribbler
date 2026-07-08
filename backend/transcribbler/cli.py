@@ -69,7 +69,7 @@ def _cmd_transcribe(args: argparse.Namespace) -> int:
 
 
 def _cmd_capture(args: argparse.Namespace) -> int:
-    from .capture import run_capture
+    from .capture import SourceError, run_capture
 
     try:
         profile_path = profiles.resolve(args.profile)
@@ -80,20 +80,24 @@ def _cmd_capture(args: argparse.Namespace) -> int:
     if not profile.asr.enabled:
         print(f"error: profile {profile.name!r} has no ASR stage", file=sys.stderr)
         return 2
-    run_capture(
-        profile,
-        Path(args.output),
-        app=args.app,
-        mic=args.mic,
-        meeting=args.meeting,
-        segment_s=args.segment,
-        diarize=not args.no_diarize,
-        threshold=args.threshold,
-        bleed_reject_db=args.bleed_reject_db,
-        denoise=args.denoise,
-        retain_audio=not args.no_audio,
-        log=lambda m: print(m, file=sys.stderr),
-    )
+    try:
+        run_capture(
+            profile,
+            Path(args.output),
+            app=args.app,
+            mic=args.mic,
+            meeting=args.meeting,
+            segment_s=args.segment,
+            diarize=not args.no_diarize,
+            threshold=args.threshold,
+            bleed_reject_db=args.bleed_reject_db,
+            denoise=args.denoise,
+            retain_audio=not args.no_audio,
+            log=lambda m: print(m, file=sys.stderr),
+        )
+    except SourceError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -188,7 +192,7 @@ def _cmd_listen(args: argparse.Namespace) -> int:
     from datetime import datetime
 
     from . import paths
-    from .capture import Controls, run_capture
+    from .capture import Controls, SourceError, run_capture
 
     try:
         profile_path = profiles.resolve(args.profile)
@@ -270,6 +274,17 @@ def _cmd_listen(args: argparse.Namespace) -> int:
         )
     except KeyboardInterrupt:
         pass
+    except SourceError as e:
+        say(f"error: {e}")
+        # nothing was captured — don't leave the empty session/scratch dirs behind.
+        # rmdir removes only if empty, so a real session's dirs are never touched.
+        for d in (workdir, out_path.parent if not args.output else None):
+            if d is not None:
+                try:
+                    d.rmdir()
+                except OSError:
+                    pass
+        return 2
     finally:
         controls.stop()
         console.done()

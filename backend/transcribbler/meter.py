@@ -56,7 +56,7 @@ def candidates(app: str) -> list[Source]:
         mics.append(default_source)
 
     return (
-        [Source(n, "meeting", n == picked.meeting) for n in meeting]
+        [Source(n, "meeting", n in picked.meeting) for n in meeting]
         + [Source(n, "mic", n == picked.mic) for n in mics]
     )
 

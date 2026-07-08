@@ -2,16 +2,21 @@
 
 Session handoff for resuming work (e.g. after context compaction).
 
-## Status: working MVP (CLI)
+## Status: working MVP — client/server wire + live capture + voiceprints
 
 Point it at a recording → diarized, readable transcript. Verified on a real 57-min
-cell-phone conference (~2.5 min to process on the RX 7900 XTX).
+cell-phone conference (~2.5 min to process on the RX 7900 XTX). The client/server
+architecture spine has since landed: a Python backend HTTP service and a Rust CLI that
+speaks it, plus live capture, voiceprint enrollment, and session packs.
 
 ```bash
 make install                 # uv sync + put `transcribbler` on ~/.local/bin (on PATH)
 transcribbler probe          # detect GPU backends (recommends vulkan here)
 transcribbler transcribe call.m4a -f md -o call.md   # profile auto-selected by GPU
 transcribbler render call.ir.json -f vtt      # re-render an IR without re-transcribing
+transcribbler enroll         # guided read-aloud → voiceprint record (session pack)
+transcribbler capture        # live mic+meeting → rolling transcript on disk
+transcribbler library        # list/inspect voiceprint records
 # -p overrides: a bare name (desktop-vulkan / cube-cuda), a .toml path, or $TRANSCRIBBLER_PROFILE
 # --progress/--no-progress: live ASR/diar % to stderr (default: on when TTY)
 # --prompt "names, jargon": bias ASR spelling (or set [asr] prompt in the profile)
@@ -20,42 +25,46 @@ make test | lint | check | validate-schemas | backend-smoke
 
 Pipeline: **whisper.cpp (Vulkan) → pyannote (ROCm) → overlap-align → Canonical IR → render (md/vtt/json)**.
 
-## Done (ADR-0008 stages 1–3)
+## Done
+
+**Core pipeline (ADR-0008 stages 1–3):**
 - Compute backend + **Canonical IR** contract (`schemas/`, validated + CI) with selectable **GPU profiles** (ADR-0015).
 - ASR (whisper.cpp/Vulkan) + **diarization** (pyannote/ROCm, sidecar in its own torch-ROCm env) + overlap alignment.
-- **Renderers** md/vtt/json; `transcribe`/`render`/`probe` CLI; Makefile control panel + ruff + CI.
+- **Renderers** md/vtt/json; `transcribe`/`render`/`probe` Python CLI; Makefile control panel + ruff + CI.
 
-## Next (task list — see TaskCreate/TaskList)
+**Client/server spine (ADR-0017–0019) — landed:**
+- **Backend HTTP service (ADR-0018):** audio → IR over HTTP on a Unix socket; server-owned async
+  jobs; SSE `queued/progress/paused/done|error|canceled`; `/v1/jobs`, `/v1/jobs/{id}/events|result`,
+  `/v1/profiles`, `/v1/version`, `/v1/healthz`; profile-by-name (server-side allowlist).
+- **Rust CLI (ADR-0017):** `clients/cli/` (cargo), IR types codegen'd from `schemas/`;
+  `transcribe`/`render`/`profiles`/`version` over the wire; render lives client-side.
 
-The architecture spine landed as **ADR-0017–0021** (Rust single-binary clients over a Python
-backend service; one client-facing HTTP wire over Unix-socket locally + TCP remotely; job
-scheduling with a "partial singleton" live mode; per-locality security tiers; a deferred
-internet cloud-worker tier). ADR-0017 **resequences the build order**: introduce the
-client/server boundary *before* the remaining features.
+**Features — landed:**
+- **Voiceprint enrollment (ADR-0016/0023):** durable XDG voiceprint store; guided read-aloud
+  `enroll`; records as OKF markdown+frontmatter; `library` inspect (#29).
+- **Session packs (ADR-0028):** `enroll` produces a real session pack; `capture`/`listen` persist
+  packs with retained audio; extract folds from the pack.
+- **Live capture (ADR-0022):** capture/listen path with live IR routing.
+- **Live speaker-ID aids (ADR-0024):** live audio-source dB meter to pin mic/meeting routes (#10);
+  low-confidence ASR spans flagged in transcript/IR (#11).
 
-**Build order (the implementation spine — do in order):**
-1. **Extract the backend HTTP service (ADR-0018)** [task #6] — wrap the existing cores
-   (`whisper_cpp`, `pyannote`, renderers) in the client-facing wire: audio → IR over HTTP on a
-   Unix socket, server-owned async jobs, SSE `queued/progress/paused/done|error|canceled`,
-   profile-by-name (server-side allowlist), `/version`. No behavior change vs today's CLI.
-2. **Build the Rust CLI to parity over the wire (ADR-0017)** [task #7, blocked by #6] —
-   `clients/cli/` (cargo), IR types **codegen'd from `schemas/`**; `transcribe/render/probe`
-   parity; render lives client-side. This is the "feels like one clean binary" successor to
-   whisper-client.
+## Next (no live TaskList — pick and open a GitHub issue + branch)
 
-**Then the features (most now ride on the wire):**
-3. **Batch/dir + YouTube ingest** [task #2, blocked by #7] — Rust-client feature; bulk (the
-   431-file Alan Watts set).
-4. **Live audio-ingest ADR** [task #8] — capture-daemon streaming path (the wire's live mode).
-5. **Capture daemon** [task #4, blocked by #7, #8] — PipeWire ring buffer + Silero VAD +
-   pre-roll + prompt-to-keep (ADR-0009/0010).
+**Genuinely remaining, unblocked:**
+- **Batch/dir + YouTube ingest** — Rust-client feature; `yt-dlp`→`ffmpeg` normalize, bulk over a
+  directory (the 431-file Alan Watts set). No code yet; only referenced in ADR-0008/0019. Rides on
+  the wire, which now exists.
+- **cube (CUDA) topology** — `profiles/cube-cuda.toml` is still marked "EXAMPLE — paths TBD". Build
+  engines on cube (RTX 4060 Ti), finalize the profile, prove "swap GPU = swap profile".
+- **Rust-client parity for `enroll`/`capture`/`meter`/`library`** — these live in the Python CLI
+  today; the Rust client covers only transcribe/render/profiles/version.
+- **Remote/TLS access (ADR-0020)** — deferred. The Rust client `bail!`s on `https://` today
+  ("tunnel over SSH and use http://"). No TLS client yet.
 
-**Independent / unblocked backend work (can start anytime, no wire dependency):**
-- **Voiceprint enrollment (ADR-0016)** [task #1] — the primary naming path. Emit
-  `speaker_embeddings` from the sidecar (currently discarded), `enroll` mode, XDG voiceprint
-  store, cosine match at transcribe → `source: "enrolled"`. *Highest backend value.*
-- **cube (CUDA) topology** [task #3] — build engines on cube, finalize `profiles/cube-cuda.toml`;
-  prove "swap GPU = swap profile".
+**Housekeeping / drift to reconcile:**
+- **ADR status drift:** 0022 (live-audio), 0023 (voiceprint-lifecycle), 0024 (live-speaker-id) still
+  read **Proposed** though their features shipped — reconcile to Accepted like ADR-0028 got (PR #32).
+- Stray artifact `backend/transcript-20260707-132240.md` — gitignore or remove.
 
 ## Key facts / context
 - **Hardware:** desktop = AMD RX 7900 XTX (24GB, Vulkan/ROCm, gfx1100); cube = NVIDIA RTX 4060 Ti (CUDA, always-on).
@@ -65,8 +74,9 @@ client/server boundary *before* the remaining features.
   HF token in `.env.hf` (gitignored); gated model `pyannote/speaker-diarization-community-1` (accepted).
 - **LLM canonicalization (ADR-0006):** built, tested, **off by default** — low yield / high compute /
   mis-attribution risk. Opt-in via the profile `[llm]` stage. Superseded by enrollment as primary naming.
-- **Decisions:** ADRs `docs/architecture/0001–0021`. Naming strategy = ADR-0016; client/server
-  architecture spine = ADR-0017–0021 (0021 Proposed/deferred, the rest Accepted).
+- **Decisions:** ADRs `docs/architecture/0001–0028`. Naming strategy = ADR-0016; client/server
+  architecture spine = ADR-0017–0021 (0021 Proposed/deferred, the rest Accepted); live-capture +
+  voiceprints + session packs = ADR-0022–0028 (0025/0026 Draft, some status drift — see Next).
 
 ## Gotchas learned (so we don't relearn them)
 - pyannote 4.x: load wav yourself (soundfile) + pass `{waveform, sample_rate}` to dodge the torchcodec
