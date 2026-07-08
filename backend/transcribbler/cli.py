@@ -123,16 +123,24 @@ def _fmt_turn(turn, color: bool) -> str:
 
 
 def _key_listener(controls, say) -> None:
-    """Single-key controls: space pauses, e flags the current speaker, q quits. cbreak mode."""
+    """Single-key controls: space pauses, e flags the current speaker, q quits. cbreak mode.
+
+    Reads the raw fd with ``os.read`` rather than buffered ``sys.stdin`` so it consumes exactly
+    one keystroke and leaves no readahead in Python's stdin buffer — the end-of-session enroll
+    prompt reads ``sys.stdin`` next, and a stray buffered byte there would corrupt its line.
+    """
     import select
 
+    fd = sys.stdin.fileno()
     while not controls.stopped:
-        r, _, _ = select.select([sys.stdin], [], [], 0.2)
+        r, _, _ = select.select([fd], [], [], 0.2)
         if not r:
             continue
         try:
-            ch = sys.stdin.read(1)
+            ch = os.read(fd, 1).decode(errors="ignore")
         except (OSError, ValueError):
+            break
+        if not ch:  # EOF on stdin
             break
         if ch == " ":
             controls.toggle_pause()
@@ -246,6 +254,7 @@ def _cmd_listen(args: argparse.Namespace) -> int:
         )
 
     old_termios = None
+    key_thread = None
     try:
         # cbreak setup lives inside the try so the finally always restores the terminal.
         if sys.stdin.isatty():
@@ -255,7 +264,8 @@ def _cmd_listen(args: argparse.Namespace) -> int:
             fd = sys.stdin.fileno()
             old_termios = termios.tcgetattr(fd)
             tty.setcbreak(fd)  # ISIG stays on → Ctrl-C still works
-            threading.Thread(target=_key_listener, args=(controls, say), daemon=True).start()
+            key_thread = threading.Thread(target=_key_listener, args=(controls, say), daemon=True)
+            key_thread.start()
             say(f"listening → {out_path}    [space] pause    [e] remember speaker    "
                 f"[q] quit (finalizes the tail)")
         else:
@@ -295,6 +305,11 @@ def _cmd_listen(args: argparse.Namespace) -> int:
         return 2
     finally:
         controls.stop()
+        # Reap the key-listener before anything reads stdin again: the enroll prompt below calls
+        # input(), and a still-running reader thread would race it for keystrokes (the line never
+        # terminates, ^M echoes). The thread polls `stopped` every ≤0.2s, so this returns quickly.
+        if key_thread is not None:
+            key_thread.join(timeout=1.0)
         console.done()
         if old_termios is not None:
             import termios
