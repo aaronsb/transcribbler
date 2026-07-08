@@ -412,6 +412,140 @@ def _cmd_library(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_pack_list(args: argparse.Namespace) -> int:
+    from . import pack
+
+    packs = pack.find_packs()
+    if not packs:
+        print("(no packs yet — run `transcribbler listen` or `enroll` to create one)")
+        return 0
+    print(f"{'uid':10}{'date':12}{'state':10}{'len':>6}  {'title':24} participants")
+    for pk in packs:
+        m = pk.meta
+        date = str(m.get("timestamp", ""))[:10]
+        length = m.get("length") or m.get("duration") or ""
+        title = str(m.get("title", "(untitled)"))[:23]
+        parts = ", ".join(m.get("participants") or [])
+        print(f"{pk.uid:10}{date:12}{str(m.get('state', '?')):10}{str(length):>6}  {title:24} {parts}")
+    return 0
+
+
+def _cmd_pack_show(args: argparse.Namespace) -> int:
+    from . import pack
+
+    try:
+        pk = pack.load_pack(args.uid)
+        d = pack.pack_details(pk)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    m = d["meta"]
+    print(f"pack {pk.uid}  —  {m.get('title', '(untitled)')}")
+    print(f"  blob   : {pk.blob_path.name}")
+    print(f"  md     : {pk.md_path.name if pk.md_path else '(none — embedded session.md only)'}")
+    print(f"  when   : {m.get('timestamp', '?')}   length {d['duration_s']:.0f}s   state {m.get('state', '?')}")
+    print(f"  tags   : {', '.join(m.get('tags') or []) or '-'}")
+    print(f"  audio  : {'present (auditionable / re-processable)' if d['has_audio'] else 'stripped (finalized)'}")
+    if m.get("voiceprints"):
+        print(f"  linked : {', '.join(m['voiceprints'])}")
+    print(f"\n  {'speaker':10}{'name':20}{'turns':>6}{'speech':>9}  clip")
+    for s in d["speakers"]:
+        print(f"  {s['id']:10}{s['name']:20}{s['turns']:>6}{s['speech_s']:>8.0f}s  {'yes' if s['clip'] else '-'}")
+    return 0
+
+
+def _cmd_pack_extract(args: argparse.Namespace) -> int:
+    from . import pack
+
+    try:
+        pk = pack.load_pack(args.uid)
+        vps = pack.extract(pk.blob_path)
+        pack.link_voiceprints(pk, vps)  # close the session→voiceprint graph edge (spec §9)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    print(f"extracted {len(vps)} voiceprint(s) from pack {pk.uid}:")
+    for vp in vps:
+        print(f"  {vp.uid:24}{vp.name:20}{vp.samples:>4} sample(s)")
+    return 0
+
+
+def _cmd_pack_audition(args: argparse.Namespace) -> int:
+    import subprocess
+    import tempfile
+
+    from . import pack
+
+    try:
+        pk = pack.load_pack(args.uid)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            clip = pack.read_clip(pk, args.speaker, Path(tmp) / "clip")
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        print(f"auditioning {args.speaker} of pack {pk.uid} — Ctrl-C to stop")
+        failed = []
+        for player in (["ffplay", "-autoexit", "-nodisp", "-loglevel", "error"], ["paplay"], ["aplay", "-q"]):
+            try:
+                subprocess.run([*player, str(clip)], check=True)
+                return 0
+            except FileNotFoundError:
+                continue  # this player isn't installed — try the next
+            except KeyboardInterrupt:
+                return 0
+            except subprocess.CalledProcessError as e:
+                failed.append(f"{player[0]} ({e})")  # present but errored — try the next player
+        if failed:
+            print(f"error: playback failed: {'; '.join(failed)}", file=sys.stderr)
+        else:
+            print("error: no audio player found (tried ffplay, paplay, aplay)", file=sys.stderr)
+        return 2
+
+
+def _cmd_pack_relabel(args: argparse.Namespace) -> int:
+    from . import pack
+
+    try:
+        pk = pack.load_pack(args.uid)
+        pk = pack.relabel(pk, args.speaker, args.name)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    print(f"relabeled {args.speaker} → {args.name!r} in pack {pk.uid}")
+    print(f"  fold it into the library:  transcribbler pack extract {pk.uid}")
+    return 0
+
+
+def _cmd_pack_delete(args: argparse.Namespace) -> int:
+    from . import pack
+
+    try:
+        pk = pack.load_pack(args.uid)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    linked = pk.meta.get("voiceprints") or []
+    if not args.yes:
+        print(f"delete pack {pk.uid} — {pk.meta.get('title', '(untitled)')} ({pk.blob_path.name})?")
+        if linked:
+            print(f"  note: {len(linked)} voiceprint(s) extracted from it stay in the library.")
+        try:
+            resp = input("  confirm delete [y/N]: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\ncancelled.", file=sys.stderr)
+            return 1
+        if resp.strip().lower() not in ("y", "yes"):
+            print("cancelled.")
+            return 1
+    pack.delete_pack(pk)
+    print(f"deleted pack {pk.uid}")
+    return 0
+
+
 def _cmd_render(args: argparse.Namespace) -> int:
     path = Path(args.ir)
     if not path.exists():
@@ -546,6 +680,30 @@ def main(argv: list[str] | None = None) -> int:
 
     lib = sub.add_parser("library", help="list enrolled voiceprints")
     lib.set_defaults(func=_cmd_library)
+
+    pk = sub.add_parser("pack", help="inspect and curate session packs (list/show/extract/audition/relabel)")
+    pk.set_defaults(func=lambda _a: (pk.print_help() or 0))  # bare `pack` → its own help
+    pk_sub = pk.add_subparsers(dest="pack_cmd")
+    pk_sub.add_parser("list", help="list session packs").set_defaults(func=_cmd_pack_list)
+    ps = pk_sub.add_parser("show", help="show a pack's speakers, audio, and graph edges")
+    ps.add_argument("uid", help="pack uid (or a unique prefix)")
+    ps.set_defaults(func=_cmd_pack_show)
+    pe = pk_sub.add_parser("extract", help="fold a pack's speaker embeddings into the voiceprint library")
+    pe.add_argument("uid", help="pack uid (or a unique prefix)")
+    pe.set_defaults(func=_cmd_pack_extract)
+    pa = pk_sub.add_parser("audition", help="play a speaker's isolated clip to identify who they are")
+    pa.add_argument("uid", help="pack uid (or a unique prefix)")
+    pa.add_argument("speaker", help="canonical speaker id (e.g. S1)")
+    pa.set_defaults(func=_cmd_pack_audition)
+    pr = pk_sub.add_parser("relabel", help="name a speaker (e.g. S1 → Priya) and re-pack the bundle")
+    pr.add_argument("uid", help="pack uid (or a unique prefix)")
+    pr.add_argument("speaker", help="canonical speaker id (e.g. S1)")
+    pr.add_argument("name", help="display name to assign")
+    pr.set_defaults(func=_cmd_pack_relabel)
+    pd = pk_sub.add_parser("delete", help="delete a pack (blob + sidecar); leaves derived voiceprints")
+    pd.add_argument("uid", help="pack uid (or a unique prefix)")
+    pd.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
+    pd.set_defaults(func=_cmd_pack_delete)
 
     r = sub.add_parser("render", help="render an existing Canonical IR to md/vtt/json")
     r.add_argument("ir", help="path to a Canonical IR .json")
