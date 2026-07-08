@@ -74,6 +74,7 @@ def build_ir(
                 "end": round(a.end, 3),
                 "text": a.text,
                 **({"secondary_speakers": a.secondary_speakers} if a.secondary_speakers else {}),
+                **({"confidence": a.confidence} if a.confidence is not None else {}),
                 "provenance": {"chunk": 0, "offset_s": 0.0},
             }
             for a in aligned
@@ -86,6 +87,7 @@ def build_ir(
                 "start": round(s.start, 3),
                 "end": round(s.end, 3),
                 "text": s.text,
+                **({"confidence": s.confidence} if s.confidence is not None else {}),
                 "provenance": {"chunk": 0, "offset_s": 0.0},
             }
             for s in segments

@@ -20,13 +20,35 @@ def _ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{sec:02d}.{ms:03d}"
 
 
+# Blocks whose weakest turn falls below this mean-token-probability are flagged in the
+# transcript as likely-garbage spans worth a human's eye (ADR-0028 → ADR-0030 reconciliation).
+LOW_CONFIDENCE = 0.6
+
+
+def _merge_confidence(current: float | None, incoming: float | None) -> float | None:
+    """A block is as trustworthy as its weakest attributed turn → keep the minimum."""
+    if incoming is None:
+        return current
+    return incoming if current is None else min(current, incoming)
+
+
+def _is_low(confidence: float | None) -> bool:
+    return confidence is not None and confidence < LOW_CONFIDENCE
+
+
 def _group_consecutive(turns: list[dict]) -> list[dict]:
-    """Merge runs of consecutive turns by the same speaker into one block."""
+    """Merge consecutive same-speaker turns into blocks, but break at a low-confidence boundary.
+
+    A low-confidence turn does not merge into a clean block (or vice versa), so the ⚠ flag marks
+    only the garbled span itself — not minutes of good transcript that happened to sit beside it.
+    """
     blocks: list[dict] = []
     for t in turns:
-        if blocks and blocks[-1]["speaker_id"] == t["speaker_id"]:
+        low = _is_low(t.get("confidence"))
+        if blocks and blocks[-1]["speaker_id"] == t["speaker_id"] and blocks[-1]["low"] == low:
             blocks[-1]["end"] = t["end"]
             blocks[-1]["text"] += " " + t["text"].strip()
+            blocks[-1]["confidence"] = _merge_confidence(blocks[-1]["confidence"], t.get("confidence"))
         else:
             blocks.append(
                 {
@@ -34,6 +56,8 @@ def _group_consecutive(turns: list[dict]) -> list[dict]:
                     "start": t["start"],
                     "end": t["end"],
                     "text": t["text"].strip(),
+                    "confidence": t.get("confidence"),
+                    "low": low,
                 }
             )
     return blocks
@@ -62,7 +86,8 @@ def to_markdown(ir: dict) -> str:
 
     body = []
     for b in _group_consecutive(ir["turns"]):
-        body.append(f"**{labels.get(b['speaker_id'], b['speaker_id'])}** [{_ts(b['start'])}]")
+        flag = f"  ⚠ low confidence ({b['confidence']:.2f})" if b["low"] else ""
+        body.append(f"**{labels.get(b['speaker_id'], b['speaker_id'])}** [{_ts(b['start'])}]{flag}")
         body.append(b["text"])
         body.append("")
     return "\n".join(head + body).rstrip() + "\n"

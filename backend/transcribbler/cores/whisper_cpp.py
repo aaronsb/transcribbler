@@ -54,25 +54,43 @@ class WhisperCppCore:
             return _parse(out_prefix.with_suffix(".json"))
 
     def _run(self, wav: Path, out_prefix: Path, *, progress: ProgressSink | None, prompt: str | None) -> None:
-        cmd = [
-            self.binary,
-            "-m",
-            self.model,
-            "-f",
-            str(wav),
-            "-pp",  # emit `progress = N%` on stderr (rendered live when streaming)
-            "-oj",  # JSON output
-            "-of",
-            str(out_prefix),  # output file prefix
-        ]
-        if prompt:
-            # carry it across whisper's internal 30s windows so the bias holds
-            # over the whole recording, not just the first window.
-            cmd += ["--prompt", prompt, "--carry-initial-prompt"]
-        on_line = line_tap(_parse_progress, progress) if progress is not None else None
-        rc, _out, tail = run_streamed(cmd, stream=progress is not None, on_line=on_line)
-        if rc != 0:
+        # Prefer full JSON (per-token probabilities → confidence); if this whisper build rejects
+        # the flag, fall back to basic JSON — the transcript still lands, confidence is just None.
+        for json_flag in ("-ojf", "-oj"):
+            cmd = [self.binary, "-m", self.model, "-f", str(wav), "-pp", json_flag, "-of", str(out_prefix)]
+            if prompt:
+                # carry it across whisper's internal 30s windows so the bias holds
+                # over the whole recording, not just the first window.
+                cmd += ["--prompt", prompt, "--carry-initial-prompt"]
+            on_line = line_tap(_parse_progress, progress) if progress is not None else None
+            rc, _out, tail = run_streamed(cmd, stream=progress is not None, on_line=on_line)
+            if rc == 0:
+                return
+            if json_flag == "-ojf" and _unknown_flag(tail, json_flag):
+                continue  # build doesn't support full JSON → retry basic (loses confidence only)
             raise RuntimeError(f"whisper-cli failed ({rc}): {tail[-500:]}")
+
+
+def _unknown_flag(tail: str, flag: str) -> bool:
+    """Heuristic: did whisper-cli reject `flag` at arg-parse (vs a real transcription failure)?"""
+    t = tail.lower()
+    return flag in t and any(w in t for w in ("unknown", "unrecognized", "invalid", "usage:"))
+
+
+def _segment_confidence(tokens: list[dict]) -> float | None:
+    """Mean probability of a segment's *word* tokens (whisper's per-token ``p``, full JSON).
+
+    Special tokens — timestamps and markers like ``[_BEG_]`` — are excluded so the score
+    reflects the actual words. Returns None when no usable probabilities are present (e.g. the
+    binary emitted basic JSON), which keeps ``confidence`` optional all the way to the IR.
+    """
+    ps: list[float] = []
+    for t in tokens:
+        p = t.get("p")
+        text = (t.get("text") or "").strip()  # null-safe; empty/whitespace tokens are not words
+        if isinstance(p, (int, float)) and text and not text.startswith("[_"):
+            ps.append(p)
+    return round(sum(ps) / len(ps), 3) if ps else None
 
 
 def _parse(json_path: Path) -> list[Segment]:
@@ -88,6 +106,7 @@ def _parse(json_path: Path) -> list[Segment]:
                 start=offsets.get("from", 0) / 1000.0,
                 end=offsets.get("to", 0) / 1000.0,
                 text=text,
+                confidence=_segment_confidence(item.get("tokens", [])),
             )
         )
     return segments
