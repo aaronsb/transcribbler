@@ -33,6 +33,19 @@ def test_segment_confidence_means_word_tokens_only():
     assert _segment_confidence([{"text": "x"}]) is None  # no probabilities → None, stays optional
 
 
+def test_segment_confidence_ignores_empty_and_null_tokens():
+    # empty/whitespace/null-text tokens carry a p but aren't words — must not skew or crash (#3/#4)
+    tokens = [{"text": "", "p": 0.01}, {"text": "  ", "p": 0.02}, {"text": None, "p": 0.03},
+              {"text": "word", "p": 0.8}]
+    assert _segment_confidence(tokens) == 0.8  # only the real word counts
+
+
+def test_unknown_flag_detection():
+    from transcribbler.cores.whisper_cpp import _unknown_flag
+    assert _unknown_flag("error: unknown argument: -ojf", "-ojf")  # arg-parse rejection → fall back
+    assert not _unknown_flag("whisper: failed to load model", "-ojf")  # real failure → don't retry
+
+
 def test_parse_reads_confidence_from_full_json(tmp_path):
     j = tmp_path / "o.json"
     j.write_text(json.dumps({"transcription": [
@@ -69,9 +82,20 @@ def test_render_flags_only_low_confidence_blocks(tmp_path):
     segs = [Segment(0.0, 1.0, "clear speech", confidence=0.95),
             Segment(1.0, 2.0, "garbled bit", confidence=0.2)]
     md = to_markdown(build_ir(segs, PROF, _wav(tmp_path)))
-    # both are the one fallback speaker → merged block; a block is as weak as its weakest turn
     assert "⚠ low confidence (0.20)" in md
+    assert md.count("⚠") == 1  # only the weak turn's block is flagged
+
+
+def test_render_isolates_a_low_span_between_clean_ones(tmp_path):
+    # same speaker throughout, one garbled span in the middle — the flag must NOT tar the clean text
+    segs = [Segment(0.0, 2.0, "clear opening", confidence=0.95),
+            Segment(2.0, 3.0, "grbl", confidence=0.2),
+            Segment(3.0, 6.0, "clear closing", confidence=0.9)]
+    md = to_markdown(build_ir(segs, PROF, _wav(tmp_path), diar_turns=[SpeakerTurn(0.0, 6.0, "0")]))
     assert md.count("⚠") == 1
+    flagged = next(part for part in md.split("**S1**") if "⚠" in part)
+    assert "grbl" in flagged
+    assert "clear opening" not in flagged and "clear closing" not in flagged
 
 
 def test_render_unflagged_without_confidence(tmp_path):

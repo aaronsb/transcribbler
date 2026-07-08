@@ -32,11 +32,20 @@ def _merge_confidence(current: float | None, incoming: float | None) -> float | 
     return incoming if current is None else min(current, incoming)
 
 
+def _is_low(confidence: float | None) -> bool:
+    return confidence is not None and confidence < LOW_CONFIDENCE
+
+
 def _group_consecutive(turns: list[dict]) -> list[dict]:
-    """Merge runs of consecutive turns by the same speaker into one block."""
+    """Merge consecutive same-speaker turns into blocks, but break at a low-confidence boundary.
+
+    A low-confidence turn does not merge into a clean block (or vice versa), so the ⚠ flag marks
+    only the garbled span itself — not minutes of good transcript that happened to sit beside it.
+    """
     blocks: list[dict] = []
     for t in turns:
-        if blocks and blocks[-1]["speaker_id"] == t["speaker_id"]:
+        low = _is_low(t.get("confidence"))
+        if blocks and blocks[-1]["speaker_id"] == t["speaker_id"] and blocks[-1]["low"] == low:
             blocks[-1]["end"] = t["end"]
             blocks[-1]["text"] += " " + t["text"].strip()
             blocks[-1]["confidence"] = _merge_confidence(blocks[-1]["confidence"], t.get("confidence"))
@@ -48,6 +57,7 @@ def _group_consecutive(turns: list[dict]) -> list[dict]:
                     "end": t["end"],
                     "text": t["text"].strip(),
                     "confidence": t.get("confidence"),
+                    "low": low,
                 }
             )
     return blocks
@@ -76,8 +86,7 @@ def to_markdown(ir: dict) -> str:
 
     body = []
     for b in _group_consecutive(ir["turns"]):
-        conf = b["confidence"]
-        flag = f"  ⚠ low confidence ({conf:.2f})" if conf is not None and conf < LOW_CONFIDENCE else ""
+        flag = f"  ⚠ low confidence ({b['confidence']:.2f})" if b["low"] else ""
         body.append(f"**{labels.get(b['speaker_id'], b['speaker_id'])}** [{_ts(b['start'])}]{flag}")
         body.append(b["text"])
         body.append("")
